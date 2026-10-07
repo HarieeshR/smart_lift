@@ -15,6 +15,9 @@ class AppConfig:
     model_path: Path = ROOT_DIR / "models" / "yolo11n.pt"
     camera_source: str = "0"
     confidence_threshold: float = 0.60
+    movement_threshold: float = 20.0
+    standing_time: float = 2.0
+    max_track_age: float = 1.0
     roi: Tuple[int, int, int, int] = (160, 180, 1120, 700)
     window_name: str = "Smart Elevator Person Detection"
     image_width: int = 1280

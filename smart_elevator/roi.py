@@ -14,6 +14,7 @@ class Detection:
     box: BoundingBox
     confidence: float
     class_id: int = 0
+    track_id: int | None = None
 
     @property
     def bottom_center(self) -> tuple[int, int]:

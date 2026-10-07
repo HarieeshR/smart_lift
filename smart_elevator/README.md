@@ -9,6 +9,7 @@ smart_elevator/
 ├── main.py                  # Webcam loop and display
 ├── detector.py              # YOLO adapter
 ├── roi.py                   # Geometry and presence decision
+├── tracking.py              # ByteTrack IDs and standing confirmation
 ├── config.py                # Camera, model, threshold, and ROI settings
 ├── setup_model.py           # Downloads the default YOLO weights
 ├── requirements.txt
@@ -16,7 +17,8 @@ smart_elevator/
 │   ├── yolo11n.pt           # Add the weights here
 │   └── README.md
 └── tests/
-    └── test_roi.py
+    ├── test_roi.py
+    └── test_tracking.py
 ```
 
 ## Installation
@@ -50,12 +52,21 @@ Edit the defaults in `AppConfig` in `config.py`:
 ```python
 camera_source: str = "0"                  # Webcam index, CCTV URL, or video path
 confidence_threshold: float = 0.60
+movement_threshold: float = 20.0       # max center displacement per frame
+standing_time: float = 2.0             # required stationary dwell in seconds
+max_track_age: float = 1.0             # remove tracks missing this long
 roi: tuple[int, int, int, int] = (160, 180, 1120, 700)  # left, top, right, bottom
 ```
 
 These values live in the `AppConfig` defaults. For a CCTV stream, use a string URL. The requested camera resolution is 1280x720; the actual stream resolution may differ, so calibrate the ROI against the displayed image.
 
 The ROI uses the bottom-center of each person bounding box. This is more useful for a standing person than the box center because it represents where the person's feet meet the floor. A detection counts only when its confidence is at least `0.60` and that anchor lies inside the ROI.
+
+## Standing-person logic
+
+The live loop uses Ultralytics ByteTrack with `persist=True`, so each person keeps a tracking ID across frames. For every tracked person, the center of the bounding box is compared with the previous frame. A track is considered stationary when that displacement is at most `movement_threshold`. Small movements from hands, head turns, or phone use therefore remain acceptable, while larger walking movement resets the stationary timer.
+
+The timer starts only while the track is inside the ROI. The result becomes `STANDING_PERSON = TRUE` only when the timer reaches `standing_time`; leaving the ROI or exceeding the movement threshold resets that timer. With the defaults, a person must remain in the waiting area with no more than 20 pixels of frame-to-frame center movement for 2 seconds.
 
 ## Run
 
@@ -71,43 +82,44 @@ python -m smart_elevator.main --camera 0 --confidence 0.60 --roi 160,180,1120,70
 
 Press `q` or `Esc` to stop. The window displays:
 
-- bounding boxes and confidence scores for person detections
+- bounding boxes, ByteTrack IDs, and confidence scores for person detections
 - the waiting-area ROI
-- detected-person count
+- `WALKING` or `STANDING` and standing duration for each track
+- detected-person count and movement threshold
 - confidence threshold
 - FPS
-- `PERSON DETECTED` or `NO PERSON`
+- `STANDING PERSON DETECTED` or `NO STANDING PERSON`
 
 The console emits the state when it changes:
 
 ```text
-PERSON_PRESENT = FALSE
-PERSON_PRESENT = TRUE
+STANDING_PERSON = FALSE
+STANDING_PERSON = TRUE
 ```
 
 This line is the Step 2 integration contract. A later controller can consume the Boolean state or a serial/MQTT adapter can forward it; no elevator movement is implemented here.
 
 ## Tests
 
-The tests use synthetic bounding boxes, so they do not require a webcam, YOLO weights, or a GUI:
+The tests use synthetic bounding boxes and track IDs, so they do not require a webcam, YOLO weights, or a GUI:
 
 ```powershell
 python -m pytest -q
 ```
 
-The cases cover no person, one or multiple waiting people, outside/entering/leaving the ROI, low confidence, partial/occluded detections, false detections, and multiple people with only one inside.
+The cases cover no person, one or multiple waiting people, outside/entering/leaving the ROI, low confidence, partial/occluded detections, false detections, walking rejection, stationary jitter, dwell confirmation, and multiple people with only one standing inside.
 
 For live testing, use a repeatable scene and verify:
 
-1. Empty ROI prints `PERSON_PRESENT = FALSE`.
-2. One person standing inside prints `TRUE` and shows a green ROI.
-3. Multiple people inside remains `TRUE` and the count increases.
+1. Empty ROI prints `STANDING_PERSON = FALSE`.
+2. One person standing inside prints `TRUE` only after 2 seconds and shows a green ROI.
+3. Multiple people inside remains `TRUE` when at least one is confirmed standing.
 4. A person outside the ROI remains `FALSE`.
-5. Walking across the ROI changes the state at the boundary.
-6. Leaving the ROI changes it back to `FALSE`.
+5. A walking person inside the ROI remains `FALSE` while their tracked center moves.
+6. Leaving the ROI changes the state back to `FALSE`.
 7. Repeat under low light and record missed detections or lower confidence.
 8. Partially occlude a person and verify behavior at the configured threshold.
 9. Check common background objects; only class `person` is accepted.
-10. Put one person inside and one outside; the result must be `TRUE`.
+10. Put one standing person inside and one outside; the result must be `TRUE`.
 
 For reliability before hardware integration, record representative daytime/nighttime clips, tune the threshold and ROI, and measure false positives, false negatives, and FPS on the target computer.
