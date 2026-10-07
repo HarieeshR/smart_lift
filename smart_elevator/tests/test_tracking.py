@@ -1,105 +1,126 @@
 from smart_elevator.roi import Detection, ROI
-from smart_elevator.tracking import StandingAnalyzer
+from smart_elevator.tracking import WaitingPersonAnalyzer, WaitingState
 
 
 WAITING_ROI = ROI.from_tuple((0, 0, 500, 500))
 
 
-def person(center_x, track_id=1, bottom=400, confidence=0.9):
+def person(foot_x, track_id=1, bottom=400, confidence=0.9):
     return Detection(
-        box=(center_x - 10, 100, center_x + 10, bottom),
+        box=(foot_x - 10, 100, foot_x + 10, bottom),
         confidence=confidence,
         track_id=track_id,
     )
 
 
-def test_does_not_confirm_on_first_frame():
-    analyzer = StandingAnalyzer(WAITING_ROI, movement_threshold=20, standing_time=2)
+def test_entered_person_is_not_valid_before_dwell():
+    analyzer = WaitingPersonAnalyzer(WAITING_ROI, min_dwell_time=3)
 
-    statuses, standing = analyzer.update([person(250)], timestamp=0.0)
+    statuses, result = analyzer.update([person(250)], timestamp=0.0)
 
-    assert not standing
-    assert not statuses[0].is_standing
-    assert statuses[0].standing_time == 0.0
+    assert not result.waiting_person
+    assert statuses[0].state is WaitingState.ENTERED
+    assert statuses[0].dwell_time == 0.0
 
 
-def test_small_natural_movement_confirms_after_dwell_time():
-    analyzer = StandingAnalyzer(WAITING_ROI, movement_threshold=20, standing_time=2)
+def test_stationary_person_becomes_valid_after_dwell():
+    analyzer = WaitingPersonAnalyzer(WAITING_ROI, min_dwell_time=3)
 
     analyzer.update([person(250)], timestamp=0.0)
-    analyzer.update([person(253)], timestamp=0.7)
-    analyzer.update([person(251)], timestamp=1.4)
-    statuses, standing = analyzer.update([person(254)], timestamp=2.0)
+    analyzer.update([person(253)], timestamp=1.0)
+    analyzer.update([person(251)], timestamp=2.0)
+    statuses, result = analyzer.update([person(254)], timestamp=3.0)
 
-    assert standing
-    assert statuses[0].is_standing
-    assert statuses[0].standing_time == 2.0
+    assert result.as_dict() == {
+        "waiting_person": True,
+        "person_id": 1,
+        "dwell_time": 3.0,
+    }
+    assert statuses[0].state is WaitingState.VALID
 
 
-def test_walking_person_never_confirms():
-    analyzer = StandingAnalyzer(WAITING_ROI, movement_threshold=20, standing_time=2)
+def test_walking_through_resets_dwell():
+    analyzer = WaitingPersonAnalyzer(
+        WAITING_ROI, min_dwell_time=3, max_allowed_movement=25, max_track_age=2
+    )
 
     analyzer.update([person(100)], timestamp=0.0)
-    analyzer.update([person(125)], timestamp=0.5)
-    statuses, standing = analyzer.update([person(155)], timestamp=2.5)
+    statuses, result = analyzer.update([person(140)], timestamp=0.5)
+    assert not result.waiting_person
+    assert statuses[0].state is WaitingState.WALKING_THROUGH
+    assert statuses[0].dwell_time == 0.0
 
-    assert not standing
-    assert not statuses[0].is_standing
-    assert statuses[0].movement > 20
-
-
-def test_person_entering_roi_must_dwell_before_confirming():
-    analyzer = StandingAnalyzer(WAITING_ROI, movement_threshold=20, standing_time=2)
-
-    analyzer.update([person(600)], timestamp=0.0)
-    statuses, standing = analyzer.update([person(450)], timestamp=0.5)
-    assert not standing
-    assert statuses[0].inside_roi
-    assert statuses[0].standing_time == 0.0
-
-    statuses, standing = analyzer.update([person(450)], timestamp=2.4)
-    assert not standing
-    assert statuses[0].inside_roi
-    assert statuses[0].standing_time == 0.0
-
-    statuses, standing = analyzer.update([person(450)], timestamp=4.4)
-    assert standing
-    assert statuses[0].is_standing
+    statuses, result =     analyzer.update([person(140)], timestamp=1.5)
+    assert not result.waiting_person
+    assert statuses[0].state is WaitingState.WAITING
+    assert statuses[0].dwell_time == 1.0
 
 
-def test_leaving_roi_clears_standing_state():
-    analyzer = StandingAnalyzer(WAITING_ROI, movement_threshold=20, standing_time=2)
+def test_leaving_before_dwell_cancels_visit():
+    analyzer = WaitingPersonAnalyzer(WAITING_ROI, min_dwell_time=3)
 
     analyzer.update([person(250)], timestamp=0.0)
-    analyzer.update([person(250)], timestamp=2.0)
-    statuses, standing = analyzer.update([person(600)], timestamp=2.1)
+    statuses, result = analyzer.update([person(600)], timestamp=1.0)
 
-    assert not standing
-    assert not statuses[0].inside_roi
-    assert not statuses[0].is_standing
+    assert not result.waiting_person
+    assert statuses[0].state is WaitingState.OUTSIDE
+    assert statuses[0].dwell_time == 0.0
 
 
-def test_one_standing_person_keeps_aggregate_true_among_walkers():
-    analyzer = StandingAnalyzer(WAITING_ROI, movement_threshold=20, standing_time=2)
+def test_valid_person_stays_valid_until_leaving_roi():
+    analyzer = WaitingPersonAnalyzer(WAITING_ROI, min_dwell_time=1)
 
-    analyzer.update([person(250, track_id=1), person(100, track_id=2)], timestamp=0.0)
-    analyzer.update([person(253, track_id=1), person(130, track_id=2)], timestamp=1.0)
-    statuses, standing = analyzer.update(
-        [person(251, track_id=1), person(160, track_id=2)], timestamp=2.0
+    analyzer.update([person(250)], timestamp=0.0)
+    analyzer.update([person(250)], timestamp=1.0)
+    statuses, result = analyzer.update([person(600)], timestamp=1.1)
+
+    assert not result.waiting_person
+    assert statuses[0].state is WaitingState.OUTSIDE
+
+
+def test_multiple_people_are_tracked_independently():
+    analyzer = WaitingPersonAnalyzer(
+        WAITING_ROI, min_dwell_time=3, max_track_age=3
     )
 
-    assert standing
-    assert statuses[0].is_standing
-    assert not statuses[1].is_standing
-
-
-def test_all_walking_people_keep_aggregate_false():
-    analyzer = StandingAnalyzer(WAITING_ROI, movement_threshold=20, standing_time=2)
-
-    analyzer.update([person(100, track_id=1), person(300, track_id=2)], timestamp=0.0)
-    statuses, standing = analyzer.update(
-        [person(130, track_id=1), person(330, track_id=2)], timestamp=2.0
+    analyzer.update(
+        [person(100, track_id=1), person(250, track_id=2)], timestamp=0.0
+    )
+    analyzer.update(
+        [person(140, track_id=1), person(250, track_id=2)], timestamp=1.0
+    )
+    statuses, result = analyzer.update(
+        [person(180, track_id=1), person(250, track_id=2)], timestamp=3.0
     )
 
-    assert not standing
-    assert all(not status.is_standing for status in statuses)
+    assert result.waiting_person
+    assert result.person_id == 2
+    assert statuses[0].state is WaitingState.WALKING_THROUGH
+    assert statuses[1].state is WaitingState.VALID
+
+
+def test_short_detection_gap_keeps_valid_result():
+    analyzer = WaitingPersonAnalyzer(
+        WAITING_ROI, min_dwell_time=1, max_track_age=1
+    )
+
+    analyzer.update([person(250)], timestamp=0.0)
+    analyzer.update([person(250)], timestamp=1.0)
+    _, result = analyzer.update([], timestamp=1.2)
+    assert result.waiting_person
+    assert result.person_id == 1
+
+    _, result = analyzer.update([], timestamp=2.1)
+    assert not result.waiting_person
+
+
+def test_foot_position_not_box_center_controls_roi():
+    analyzer = WaitingPersonAnalyzer(WAITING_ROI, min_dwell_time=1)
+    detection = Detection(
+        box=(250, -300, 350, 400), confidence=0.9, track_id=1
+    )
+
+    statuses, result = analyzer.update([detection], timestamp=0.0)
+
+    assert statuses[0].inside_roi
+    assert not result.waiting_person

@@ -18,8 +18,13 @@ class Detection:
 
     @property
     def bottom_center(self) -> tuple[int, int]:
-        left, top, right, bottom = self.box
-        return ((left + right) // 2, bottom)
+        x, y = self.foot_position
+        return round(x), round(y)
+
+    @property
+    def foot_position(self) -> tuple[float, float]:
+        left, _, right, bottom = self.box
+        return ((left + right) / 2.0, float(bottom))
 
     @property
     def center(self) -> tuple[int, int]:

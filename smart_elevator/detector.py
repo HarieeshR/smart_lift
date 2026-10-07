@@ -20,6 +20,7 @@ class PersonDetector:
         model_path: Path,
         confidence_threshold: float,
         device: Optional[str] = None,
+        inference_image_size: int = 960,
     ) -> None:
         try:
             from ultralytics import YOLO
@@ -36,12 +37,17 @@ class PersonDetector:
         self.model = YOLO(str(model_path))
         self.confidence_threshold = confidence_threshold
         self.device = device
+        if inference_image_size <= 0:
+            raise ValueError("inference_image_size must be positive")
+        self.inference_image_size = inference_image_size
 
     def detect(self, frame) -> list[Detection]:
         """Run one independent inference without tracking IDs."""
         results = self.model.predict(
             source=frame,
             conf=self.confidence_threshold,
+            classes=[PERSON_CLASS_ID],
+            imgsz=self.inference_image_size,
             device=self.device,
             verbose=False,
         )
@@ -52,6 +58,8 @@ class PersonDetector:
         results = self.model.track(
             source=frame,
             conf=self.confidence_threshold,
+            classes=[PERSON_CLASS_ID],
+            imgsz=self.inference_image_size,
             device=self.device,
             persist=True,
             tracker="bytetrack.yaml",
