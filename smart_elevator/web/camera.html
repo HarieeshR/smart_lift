@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Floor Camera</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    .phone { max-width: 560px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+    .phone video { width: 100%; border-radius: 8px; background: #05070a; border: 1px solid #000; display: block; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .controls select, .controls button {
+      height: 42px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px;
+      background: #0a0e12; color: var(--text); font: 600 14px var(--mono);
+    }
+    .controls button { grid-column: 1 / -1; cursor: pointer; background: rgba(255,179,64,.14); color: var(--amber); border-color: rgba(255,179,64,.5); }
+    .controls button.live { background: rgba(255,91,91,.14); color: var(--red); border-color: rgba(255,91,91,.5); }
+    .warn { padding: 10px 12px; border: 1px solid rgba(255,91,91,.5); border-radius: 8px; color: var(--red); font-size: 13px; }
+    .warn[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span>▲</span><span>▼</span></div>
+      <div>
+        <p class="eyebrow">SMART ELEVATOR · FLOOR CAMERA</p>
+        <h1>Use this device as a lobby camera</h1>
+      </div>
+    </div>
+  </header>
+  <main class="phone">
+    <p id="insecure" class="warn" hidden>This page is not on HTTPS, so the browser blocks the camera. Restart the server with <code>--https</code> and open the https:// address (accept the certificate warning once).</p>
+    <section class="panel">
+      <div class="controls">
+        <label><span class="label">FLOOR</span><select id="floor"></select></label>
+        <label><span class="label">CAMERA</span>
+          <select id="facing">
+            <option value="environment">Back</option>
+            <option value="user">Front</option>
+          </select>
+        </label>
+        <button id="toggle">Start streaming</button>
+      </div>
+    </section>
+    <video id="preview" playsinline muted></video>
+    <div class="readouts">
+      <div><span class="label">LINK</span><strong id="link">IDLE</strong></div>
+      <div><span class="label">SENT FPS</span><strong id="fps">0.0</strong></div>
+      <div><span class="label">WAITING</span><strong id="waiting" class="false">FALSE</strong></div>
+      <div><span class="label">IN ZONE</span><strong id="zone">0</strong></div>
+    </div>
+    <p class="note">Point the camera at the waiting area in front of the lift doors, landscape if possible. Keep this page open; the screen is kept awake while streaming.</p>
+  </main>
+  <script src="/camera.js"></script>
+</body>
+</html>

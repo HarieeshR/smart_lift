@@ -5,11 +5,18 @@ const CAMERA_SVG = `<svg viewBox="0 0 26 16" aria-hidden="true"><rect x="1" y="3
 
 let state = null;
 let numFloors = 0;
+let viewFloor = null;
+let feedKey = '';
 const view = {position: 1, door: 0, last: performance.now()};
 
-function post(path) {
-  return fetch(path, {method: 'POST'}).then((response) => {
-    if (!response.ok) throw new Error(response.statusText);
+function post(path, body, method = 'POST') {
+  const options = {method};
+  if (body !== undefined) {
+    options.headers = {'Content-Type': 'application/json'};
+    options.body = JSON.stringify(body);
+  }
+  return fetch(path, options).then(async (response) => {
+    if (!response.ok) throw new Error((await response.text()) || response.statusText);
     return response.json();
   });
 }
@@ -44,9 +51,60 @@ function build(floors) {
   $('carButtons').innerHTML = floorsDescending
     .map((floor) => `<button class="car-btn" data-car="${floor}" aria-label="Car call floor ${floor}">${floor}</button>`)
     .join('');
-  $('cameraFloorButtons').innerHTML = floorsDescending.reverse()
-    .map((floor) => `<button data-camera="${floor}">${floor}</button>`)
-    .join('');
+  $('cameraRows').innerHTML = floorsDescending.reverse().map((floor) => `
+    <div class="cam-row" data-row="${floor}">
+      <button class="cam-floor" data-view="${floor}" aria-label="Show floor ${floor} feed">${floor}</button>
+      <span class="cam-state"><i></i><b>OFF</b></span>
+      <select data-kind="${floor}" aria-label="Floor ${floor} camera type">
+        <option value="off">Off</option>
+        <option value="local">Webcam index</option>
+        <option value="url">Stream URL</option>
+        <option value="browser">Phone / browser</option>
+      </select>
+      <input data-source="${floor}" placeholder="0" aria-label="Floor ${floor} camera source" spellcheck="false">
+      <button class="cam-apply" data-apply="${floor}">Apply</button>
+    </div>`).join('');
+  $('phoneLink').textContent = `${location.origin}/camera`;
+}
+
+const PLACEHOLDERS = {off: '', local: '0', url: 'http://192.168.1.20:8080/video', browser: 'open /camera on the device'};
+
+function syncSourceField(row) {
+  const kind = row.querySelector('select').value;
+  const input = row.querySelector('input');
+  input.placeholder = PLACEHOLDERS[kind];
+  input.disabled = kind === 'off' || kind === 'browser';
+}
+
+document.addEventListener('change', (event) => {
+  const row = event.target.closest('.cam-row');
+  if (!row) return;
+  row.dataset.dirty = '1';
+  syncSourceField(row);
+});
+document.addEventListener('input', (event) => {
+  const row = event.target.closest('.cam-row');
+  if (row) row.dataset.dirty = '1';
+});
+
+async function applyCamera(floor) {
+  const row = document.querySelector(`.cam-row[data-row="${floor}"]`);
+  const kind = row.querySelector('select').value;
+  const source = row.querySelector('input').value.trim();
+  try {
+    const next = kind === 'off'
+      ? await post(`/api/cameras/${floor}`, undefined, 'DELETE')
+      : await post(`/api/cameras/${floor}`, {kind, source});
+    delete row.dataset.dirty;
+    row.classList.remove('error');
+    if (kind !== 'off') viewFloor = floor;
+    feedKey = '';
+    render(next);
+  } catch (error) {
+    row.classList.add('error');
+    row.querySelector('.cam-state b').textContent = 'INVALID';
+    console.error(error);
+  }
 }
 
 function flashDenied(button) {
@@ -67,8 +125,11 @@ document.addEventListener('click', async (event) => {
       if (!registered && next.events[0]?.message.includes('rejected')) flashDenied(button);
     } else if (button.dataset.car) {
       render(await post(`/api/car/${button.dataset.car}`));
-    } else if (button.dataset.camera) {
-      render(await post(`/api/camera-floor/${button.dataset.camera}`));
+    } else if (button.dataset.apply) {
+      await applyCamera(Number(button.dataset.apply));
+    } else if (button.dataset.view) {
+      viewFloor = Number(button.dataset.view);
+      if (state) render(state);
     }
   } catch (error) {
     console.error(error);
@@ -86,38 +147,76 @@ function escapeHtml(text) {
 function render(next) {
   state = next;
   if (next.num_floors !== numFloors) build(next.num_floors);
-  const camera = next.camera || {};
-  const waiting = Boolean(camera.waiting_person);
+  const cameras = new Map((next.cameras || []).map((c) => [c.floor, c]));
   const direction = next.direction;
   const doorsOpen = next.door_state !== 'CLOSED';
+  const waitingFloors = [...cameras.values()].filter((c) => c.waiting_person).map((c) => c.floor);
 
   const pill = $('globalStatus');
-  pill.className = `status-pill ${waiting ? 'active' : 'idle'}`;
-  pill.querySelector('span').textContent = waiting ? 'WAITING PERSON DETECTED' : 'NO WAITING PERSON';
+  pill.className = `status-pill ${waitingFloors.length ? 'active' : 'idle'}`;
+  pill.querySelector('span').textContent = waitingFloors.length
+    ? `WAITING · FLOOR ${waitingFloors.join(', ')}`
+    : 'NO WAITING PERSON';
 
-  // CCTV panel
+  // CCTV panel: big view of the selected floor
+  if (viewFloor === null || (!cameras.has(viewFloor) && cameras.size)) {
+    viewFloor = cameras.size ? [...cameras.keys()][0] : (viewFloor ?? 1);
+  }
+  const camera = cameras.get(viewFloor) || {};
+  const waiting = Boolean(camera.waiting_person);
   $('waitingValue').textContent = waiting ? 'TRUE' : 'FALSE';
   $('waitingValue').className = waiting ? 'true' : 'false';
   $('personValue').textContent = camera.person_id ?? '—';
   $('dwellValue').textContent = `${Number(camera.dwell_time || 0).toFixed(1)}s`;
-  $('trackCount').textContent = (camera.tracks || []).length;
-  $('cameraFloorLabel').textContent = `FLOOR ${next.camera_floor}`;
-  $('cctvCam').textContent = `CAM 01 · FLOOR ${next.camera_floor}`;
-  $('noSignal').hidden = !camera.camera_error;
-  $('cameraError').textContent = camera.camera_error || '';
-  document.querySelectorAll('[data-camera]').forEach((b) => {
-    b.classList.toggle('active', Number(b.dataset.camera) === next.camera_floor);
+  $('trackCount').textContent = camera.people_in_zone ?? 0;
+  $('cameraFloorLabel').textContent = `FLOOR ${viewFloor}`;
+  $('cctvCam').textContent = camera.kind
+    ? `FLOOR ${viewFloor} · ${camera.kind.toUpperCase()} · ${Number(camera.fps || 0).toFixed(1)} FPS`
+    : `FLOOR ${viewFloor}`;
+  const signalError = !camera.kind
+    ? `No camera on floor ${viewFloor}`
+    : (!camera.online ? (camera.error || 'Camera offline') : '');
+  $('noSignal').hidden = !signalError;
+  $('cameraError').textContent = signalError;
+  const key = camera.kind ? `${viewFloor}:${camera.kind}:${camera.source}` : '';
+  if (key !== feedKey) {
+    feedKey = key;
+    if (key) $('feed').src = `/video_feed/${viewFloor}?t=${Date.now()}`;
+    else $('feed').removeAttribute('src');
+  }
+
+  document.querySelectorAll('.cam-row').forEach((row) => {
+    const floor = Number(row.dataset.row);
+    const cam = cameras.get(floor);
+    row.classList.toggle('viewing', floor === viewFloor);
+    row.classList.toggle('on', Boolean(cam));
+    row.classList.toggle('online', Boolean(cam?.online));
+    row.classList.toggle('waiting', Boolean(cam?.waiting_person));
+    if (!row.classList.contains('error')) {
+      row.querySelector('.cam-state b').textContent = !cam ? 'OFF'
+        : (cam.waiting_person ? 'WAITING' : (cam.online ? (cam.people_in_zone ? 'PERSON' : 'ONLINE') : 'OFFLINE'));
+    }
+    row.title = cam?.error || '';
+    if (!row.dataset.dirty && document.activeElement?.closest('.cam-row') !== row) {
+      row.querySelector('select').value = cam ? cam.kind : 'off';
+      row.querySelector('input').value = cam && cam.kind !== 'browser' ? cam.source : '';
+      syncSourceField(row);
+    }
   });
 
   // Building
-  $('directionLabel').textContent = next.moving ? `MOVING ${direction}` : (doorsOpen ? `DOORS ${next.door_state}` : direction);
+  $('directionLabel').textContent = next.homing
+    ? `RETURNING TO ${next.home_floor}`
+    : (next.moving ? `MOVING ${direction}` : (doorsOpen ? `DOORS ${next.door_state}` : direction));
   $('directionLabel').className = `dir-chip ${next.moving ? direction.toLowerCase() : ''}`;
   $('sheave').className = `sheave ${next.moving ? direction.toLowerCase() : ''}`;
   $('cabinDisplay').textContent = next.current_floor;
   const hallLit = new Set(next.hall_calls.map((c) => `${c.floor}-${c.direction}`));
+  const floorCalls = new Set(next.floor_calls || []);
   document.querySelectorAll('.lobby').forEach((lobby) => {
     const floor = Number(lobby.dataset.floor);
-    const isCamera = floor === next.camera_floor;
+    const floorCam = cameras.get(floor);
+    const isCamera = Boolean(floorCam);
     const atFloor = !next.moving && doorsOpen && next.current_floor === floor;
     lobby.classList.toggle('camera', isCamera);
     lobby.querySelector('.cam-badge').hidden = !isCamera;
@@ -126,17 +225,17 @@ function render(next) {
     lobby.querySelector('.lantern .up').classList.toggle('on', atFloor && direction === 'UP');
     lobby.querySelector('.lantern .down').classList.toggle('on', atFloor && direction === 'DOWN');
     lobby.querySelectorAll('[data-hall]').forEach((b) => {
-      b.classList.toggle('lit', hallLit.has(`${floor}-${b.dataset.hall.toUpperCase()}`));
+      b.classList.toggle('lit', floorCalls.has(floor) || hallLit.has(`${floor}-${b.dataset.hall.toUpperCase()}`));
     });
     const occupant = lobby.querySelector('.occupant');
-    const showPerson = isCamera && waiting;
+    const showPerson = Boolean(floorCam?.waiting_person);
     if (occupant.dataset.shown !== String(showPerson)) {
       occupant.dataset.shown = String(showPerson);
       occupant.innerHTML = showPerson ? `<div class="person-tag">WAITING</div>${PERSON_SVG}` : '';
       occupant.querySelector('.person')?.classList.add('waiting');
     }
     const tag = occupant.querySelector('.person-tag');
-    if (tag) tag.textContent = `ID ${camera.person_id ?? '?'} · ${Number(camera.dwell_time || 0).toFixed(1)}s`;
+    if (tag) tag.textContent = `ID ${floorCam.person_id ?? '?'} · ${Number(floorCam.dwell_time || 0).toFixed(1)}s`;
   });
 
   // Car operating panel
@@ -152,7 +251,7 @@ function render(next) {
     ? next.planned_stops.map((f) => `<span class="chip">${f}</span>`).join('<span class="sep">→</span>')
     : '<span class="empty">Idle — no pending calls</span>';
   $('events').innerHTML = next.events.map((e) => {
-    const tone = /cancelled|rejected/.test(e.message) ? 'bad' : (/Stopped/.test(e.message) ? 'good' : '');
+    const tone = /cancelled|rejected|offline/.test(e.message) ? 'bad' : (/Stopped|Parked/.test(e.message) ? 'good' : '');
     return `<li class="${tone}"><time>${formatTime(new Date(e.time * 1000))}</time><span>${escapeHtml(e.message)}</span></li>`;
   }).join('');
 }

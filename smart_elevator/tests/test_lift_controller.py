@@ -139,3 +139,82 @@ def test_snapshot_reports_calls_and_plan():
     assert snapshot["planned_stops"] == [2, 3]
     assert snapshot["door_state"] == "CLOSED"
     assert snapshot["events"][0]["message"] == "Car call registered: floor 2"
+
+
+def test_floor_call_is_served_in_either_direction():
+    lift = controller()
+    lift.add_car_call(5)
+    lift.add_floor_call(3)
+
+    assert run_until_idle(lift) == [3, 5]
+
+    lift = controller(start_floor=5)
+    lift.add_car_call(1)
+    lift.add_floor_call(3)
+
+    assert run_until_idle(lift) == [3, 1]
+    assert lift.floor_calls == set()
+
+
+def test_cancelled_floor_call_lets_the_car_continue_to_the_next_call():
+    lift = controller()
+    lift.add_floor_call(3)
+    lift.add_car_call(5)
+    lift.tick(0.1)
+    lift.tick(0.5)
+
+    assert lift.cancel_floor_call(3, "person left")
+    assert not lift.cancel_floor_call(3, "again")
+    assert run_until_idle(lift) == [5]
+
+
+def run_for(lift: LookController, seconds: float, dt: float = 0.1) -> None:
+    for _ in range(round(seconds / dt)):
+        lift.tick(dt)
+
+
+def test_idle_car_returns_home_without_opening_doors():
+    lift = controller(start_floor=4, idle_return_delay=5.0)
+    run_for(lift, 4.0)
+    assert lift.position == 4.0 and not lift.homing
+
+    run_for(lift, 1.2)
+    assert lift.homing and lift.moving
+    run_for(lift, 4.0)
+
+    assert lift.position == 1.0
+    assert not lift.homing and not lift.moving
+    assert lift.door_state is DoorState.CLOSED
+    assert lift.direction is Direction.IDLE
+    assert "Parked at floor 1" in lift.events[0]["message"]
+
+
+def test_call_on_the_way_home_is_served():
+    lift = controller(start_floor=5, idle_return_delay=1.0)
+    run_for(lift, 1.6)
+    assert lift.homing and 4.0 < lift.position < 5.0
+
+    lift.add_hall_call(3, DOWN)
+    run_for(lift, 2.0)
+    assert lift.position == 3.0
+    assert lift.door_state is not DoorState.CLOSED
+    assert not lift.homing
+    assert list(lift.stops) == [3]
+
+
+def test_call_behind_a_homing_car_cancels_homing():
+    lift = controller(start_floor=4, idle_return_delay=1.0)
+    run_for(lift, 1.6)
+    assert lift.homing and lift.position < 4.0
+
+    lift.add_car_call(5)
+    run_until_idle(lift)
+
+    assert list(lift.stops) == [5]
+    assert not lift.homing
+
+
+def test_homing_is_disabled_by_default():
+    lift = controller(start_floor=3)
+    run_for(lift, 60.0)
+    assert lift.position == 3.0

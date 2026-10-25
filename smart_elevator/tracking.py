@@ -1,14 +1,35 @@
-"""Temporal waiting-person state machine for persistent YOLO tracks."""
+"""Temporal waiting-person state machine for persistent YOLO tracks.
+
+A person counts as *waiting* once their feet have stayed inside the ROI for
+``min_dwell_time`` seconds without sustained travel.  Travel is measured as
+the net drift of a smoothed foot position over ``motion_window`` seconds,
+divided by the person's box height, so the threshold means the same thing for
+someone near the camera (large box) and someone far away (small box).
+Short glitches are absorbed by hysteresis:
+
+* motion must stay above the limit for ``walk_confirm_time`` before a track is
+  marked ``WALKING THROUGH`` (one jittery box does not reset the dwell);
+* feet may leave the ROI for up to ``exit_grace`` seconds without losing the
+  visit (ROI-edge jitter);
+* a track survives detector misses for up to ``max_track_age`` seconds.
+"""
 
 from dataclasses import dataclass
 from enum import Enum
 from collections import deque
-from math import hypot
+from math import exp, hypot
 
 try:
     from .roi import Detection, ROI
 except ImportError:  # Supports running main.py directly from this directory.
     from roi import Detection, ROI
+
+
+# Time constant of the foot/box-height smoothing filter, in seconds.
+SMOOTHING_TAU = 0.15
+# Speed is never computed over less than this span, to avoid dividing tiny
+# jitters by tiny time steps right after a track appears.
+MIN_SPEED_SPAN = 0.3
 
 
 class WaitingState(str, Enum):
@@ -26,12 +47,14 @@ class WaitingResult:
     waiting_person: bool
     person_id: int | None
     dwell_time: float
+    people_in_zone: int = 0
 
     def as_dict(self) -> dict[str, bool | int | float | None]:
         return {
             "waiting_person": self.waiting_person,
             "person_id": self.person_id,
             "dwell_time": self.dwell_time,
+            "people_in_zone": self.people_in_zone,
         }
 
 
@@ -45,16 +68,19 @@ class TrackStatus:
     movement: float
     foot_position: tuple[float, float]
     inside_roi: bool
+    speed: float = 0.0
 
 
 @dataclass
 class _TrackState:
-    previous_foot: tuple[float, float]
+    smooth_foot: tuple[float, float]
     recent_feet: deque[tuple[float, tuple[float, float]]]
     box_height: float
     entry_time: float | None = None
     state: WaitingState = WaitingState.OUTSIDE
     last_seen: float = 0.0
+    last_inside: float | None = None
+    moving_since: float | None = None
 
 
 class WaitingPersonAnalyzer:
@@ -63,21 +89,30 @@ class WaitingPersonAnalyzer:
     def __init__(
         self,
         roi: ROI,
-        min_dwell_time: float = 3.0,
-        max_allowed_movement: float = 25.0,
-        max_track_age: float = 1.0,
-        motion_window: float = 0.75,
+        min_dwell_time: float = 2.0,
+        max_waiting_speed: float = 0.35,
+        max_allowed_movement: float | None = None,
+        walk_confirm_time: float = 0.4,
+        exit_grace: float = 0.7,
+        max_track_age: float = 1.5,
+        motion_window: float = 1.0,
     ) -> None:
         if (
             min_dwell_time <= 0
-            or max_allowed_movement < 0
+            or max_waiting_speed <= 0
+            or (max_allowed_movement is not None and max_allowed_movement < 0)
+            or walk_confirm_time < 0
+            or exit_grace < 0
             or max_track_age < 0
             or motion_window <= 0
         ):
             raise ValueError("Waiting settings must be valid positive values")
         self.roi = roi
         self.min_dwell_time = min_dwell_time
+        self.max_waiting_speed = max_waiting_speed
         self.max_allowed_movement = max_allowed_movement
+        self.walk_confirm_time = walk_confirm_time
+        self.exit_grace = exit_grace
         self.max_track_age = max_track_age
         self.motion_window = motion_window
         self._tracks: dict[int, _TrackState] = {}
@@ -91,37 +126,95 @@ class WaitingPersonAnalyzer:
     def result(self) -> WaitingResult:
         return self._result
 
-    def _movement_in_window(
-        self,
-        state: _TrackState,
-        timestamp: float,
-        foot: tuple[float, float],
-    ) -> float:
-        state.recent_feet.append((timestamp, foot))
-        while (
-            len(state.recent_feet) > 1
-            and timestamp - state.recent_feet[0][0] > self.motion_window
-        ):
-            state.recent_feet.popleft()
-        x_values = [point[0] for _, point in state.recent_feet]
-        y_values = [point[1] for _, point in state.recent_feet]
-        return hypot(max(x_values) - min(x_values), max(y_values) - min(y_values))
+    def _motion(
+        self, state: _TrackState, timestamp: float
+    ) -> tuple[float, float]:
+        """Return (net drift in pixels, speed in body-heights/s) over the window."""
+        recent = state.recent_feet
+        recent.append((timestamp, state.smooth_foot))
+        # Keep one sample at or beyond the window edge as the drift anchor.
+        while len(recent) > 2 and timestamp - recent[1][0] >= self.motion_window:
+            recent.popleft()
+        anchor_time, anchor = recent[0]
+        drift = hypot(
+            state.smooth_foot[0] - anchor[0], state.smooth_foot[1] - anchor[1]
+        )
+        span = max(timestamp - anchor_time, MIN_SPEED_SPAN)
+        return drift, drift / max(state.box_height, 1.0) / span
 
-    def _status(
+    def _is_moving(self, drift: float, speed: float) -> bool:
+        if speed > self.max_waiting_speed:
+            return True
+        return self.max_allowed_movement is not None and drift > self.max_allowed_movement
+
+    def _new_track(
+        self, detection: Detection, timestamp: float, inside: bool
+    ) -> _TrackState:
+        foot = detection.foot_position
+        return _TrackState(
+            smooth_foot=foot,
+            recent_feet=deque([(timestamp, foot)]),
+            box_height=max(1.0, detection.box[3] - detection.box[1]),
+            entry_time=timestamp if inside else None,
+            state=WaitingState.ENTERED if inside else WaitingState.OUTSIDE,
+            last_seen=timestamp,
+            last_inside=timestamp if inside else None,
+        )
+
+    def _advance(
         self,
-        track_id: int,
         state: _TrackState,
-        foot: tuple[float, float],
-        movement: float,
+        detection: Detection,
         timestamp: float,
         inside: bool,
-    ) -> TrackStatus:
-        dwell = (
-            0.0
-            if state.entry_time is None
-            else max(0.0, timestamp - state.entry_time)
+    ) -> tuple[float, float]:
+        elapsed = max(timestamp - state.last_seen, 0.0)
+        alpha = 1.0 - exp(-elapsed / SMOOTHING_TAU) if elapsed > 0 else 1.0
+        foot = detection.foot_position
+        state.smooth_foot = (
+            state.smooth_foot[0] + alpha * (foot[0] - state.smooth_foot[0]),
+            state.smooth_foot[1] + alpha * (foot[1] - state.smooth_foot[1]),
         )
-        return TrackStatus(track_id, state.state, dwell, movement, foot, inside)
+        height = max(1.0, detection.box[3] - detection.box[1])
+        state.box_height += alpha * (height - state.box_height)
+        state.last_seen = timestamp
+        drift, speed = self._motion(state, timestamp)
+
+        if self._is_moving(drift, speed):
+            if state.moving_since is None:
+                state.moving_since = timestamp
+        else:
+            state.moving_since = None
+        walking = (
+            state.moving_since is not None
+            and timestamp - state.moving_since >= self.walk_confirm_time
+        )
+
+        if inside:
+            state.last_inside = timestamp
+        elif state.last_inside is None or timestamp - state.last_inside > self.exit_grace:
+            state.entry_time = None
+            state.state = WaitingState.OUTSIDE
+            return drift, speed
+        else:
+            # Briefly outside: keep the visit (and its dwell) untouched.
+            return drift, speed
+
+        if walking:
+            state.entry_time = None
+            state.state = WaitingState.WALKING_THROUGH
+        elif state.entry_time is None:
+            state.entry_time = timestamp
+            state.state = (
+                WaitingState.WAITING
+                if state.state is WaitingState.WALKING_THROUGH
+                else WaitingState.ENTERED
+            )
+        elif timestamp - state.entry_time >= self.min_dwell_time:
+            state.state = WaitingState.VALID
+        else:
+            state.state = WaitingState.WAITING
+        return drift, speed
 
     def update(
         self,
@@ -134,48 +227,29 @@ class WaitingPersonAnalyzer:
             if detection.track_id is None:
                 continue
             track_id = detection.track_id
-            foot = detection.foot_position
             inside = self.roi.contains_detection(detection)
             state = self._tracks.get(track_id)
             if state is None or timestamp - state.last_seen > self.max_track_age:
-                state = _TrackState(
-                    previous_foot=foot,
-                    recent_feet=deque([(timestamp, foot)]),
-                    box_height=max(0.0, detection.box[3] - detection.box[1]),
-                    entry_time=timestamp if inside else None,
-                    state=WaitingState.ENTERED if inside else WaitingState.OUTSIDE,
-                    last_seen=timestamp,
-                )
+                state = self._new_track(detection, timestamp, inside)
                 self._tracks[track_id] = state
-                movement = 0.0
+                drift, speed = 0.0, 0.0
             else:
-                movement = max(
-                    hypot(
-                        foot[0] - state.previous_foot[0],
-                        foot[1] - state.previous_foot[1],
-                    ),
-                    self._movement_in_window(state, timestamp, foot),
-                )
-                if not inside:
-                    state.entry_time = None
-                    state.state = WaitingState.OUTSIDE
-                elif movement > self.max_allowed_movement:
-                    state.entry_time = timestamp
-                    state.state = WaitingState.WALKING_THROUGH
-                elif state.entry_time is None:
-                    state.entry_time = timestamp
-                    state.state = WaitingState.ENTERED
-                elif timestamp - state.entry_time >= self.min_dwell_time:
-                    state.state = WaitingState.VALID
-                else:
-                    state.state = WaitingState.WAITING
-                state.previous_foot = foot
-                state.box_height = max(
-                    0.0, detection.box[3] - detection.box[1]
-                )
-                state.last_seen = timestamp
+                drift, speed = self._advance(state, detection, timestamp, inside)
+            dwell = (
+                0.0
+                if state.entry_time is None
+                else max(0.0, timestamp - state.entry_time)
+            )
             statuses.append(
-                self._status(track_id, state, foot, movement, timestamp, inside)
+                TrackStatus(
+                    track_id,
+                    state.state,
+                    dwell,
+                    drift,
+                    detection.foot_position,
+                    inside,
+                    speed,
+                )
             )
 
         expired = [
@@ -186,11 +260,15 @@ class WaitingPersonAnalyzer:
         for track_id in expired:
             del self._tracks[track_id]
 
+        in_zone = sum(
+            1
+            for state in self._tracks.values()
+            if state.state is not WaitingState.OUTSIDE
+        )
         valid = [
             (track_id, state)
             for track_id, state in self._tracks.items()
             if state.state is WaitingState.VALID
-            and timestamp - state.last_seen <= self.max_track_age
         ]
         if valid:
             person_id, person_state = max(
@@ -214,9 +292,10 @@ class WaitingPersonAnalyzer:
                 True,
                 person_id,
                 max(0.0, timestamp - entry_time),
+                in_zone,
             )
         else:
-            self._result = WaitingResult(False, None, 0.0)
+            self._result = WaitingResult(False, None, 0.0, in_zone)
         return statuses, self._result
 
 

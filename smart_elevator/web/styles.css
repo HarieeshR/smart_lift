@@ -289,3 +289,39 @@ h3 { font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: up
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------- floor cameras ---------- */
+.camera-rows { display: flex; flex-direction: column; gap: 6px; }
+.cam-row {
+  display: grid; grid-template-columns: 34px 92px minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: center; gap: 6px;
+  padding: 5px; border: 1px solid var(--line); border-radius: 8px; background: #0e1318;
+}
+.cam-row.viewing { border-color: rgba(255,179,64,.55); }
+.cam-row.error { border-color: rgba(255,91,91,.6); }
+.cam-floor {
+  height: 30px; border: 1px solid var(--line); border-radius: 6px; background: #151c23; cursor: pointer;
+  font: 700 14px var(--mono); color: var(--muted);
+}
+.cam-row.viewing .cam-floor { background: rgba(255,179,64,.14); color: var(--amber); }
+.cam-state { display: flex; align-items: center; gap: 6px; font: 600 10px var(--mono); color: var(--muted); letter-spacing: .06em; }
+.cam-state i { width: 8px; height: 8px; border-radius: 50%; background: #3a434d; flex: none; }
+.cam-row.on .cam-state i { background: var(--red); }
+.cam-row.online .cam-state i { background: var(--amber); }
+.cam-row.waiting .cam-state i { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.cam-row.waiting .cam-state { color: var(--green); }
+.cam-row.error .cam-state { color: var(--red); }
+.cam-row select, .cam-row input {
+  min-width: 0; height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: #0a0e12; color: var(--text); font: 12px var(--mono);
+}
+.cam-row input:disabled { opacity: .45; }
+.cam-apply {
+  height: 30px; padding: 0 12px; border: 1px solid rgba(255,179,64,.45); border-radius: 6px; cursor: pointer;
+  background: rgba(255,179,64,.12); color: var(--amber); font: 600 12px var(--mono);
+}
+.cam-apply:hover { background: rgba(255,179,64,.22); }
+.note code { font: 11px var(--mono); color: var(--amber); word-break: break-all; }
+@media (max-width: 720px) {
+  .cam-row { grid-template-columns: 34px 1fr auto; }
+  .cam-row select, .cam-row input { grid-column: 1 / -1; order: 1; }
+}

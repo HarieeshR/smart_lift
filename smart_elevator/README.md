@@ -11,8 +11,9 @@ smart_elevator/
 ├── roi.py                   # Geometry and presence decision
 ├── tracking.py              # ByteTrack IDs and waiting-person state machine
 ├── lift_controller.py       # LOOK scheduler, hall/car calls, door timing
-├── web_server.py            # Browser lift simulation (camera + LOOK controller)
-├── web/                     # Simulation UI (index.html, styles.css, app.js)
+├── cameras.py               # Per-floor cameras: webcam, stream URL, browser push
+├── web_server.py            # Browser lift simulation (cameras + LOOK controller)
+├── web/                     # Dashboard (index.html, app.js) and phone page (camera.html)
 ├── config.py                # Camera, model, threshold, and ROI settings
 ├── setup_model.py           # Downloads the default YOLO weights
 ├── requirements.txt
@@ -57,10 +58,14 @@ Edit the defaults in `AppConfig` in `config.py`:
 ```python
 camera_source: str = "0"                  # Webcam index, CCTV URL, or video path
 confidence_threshold: float = 0.50
-inference_image_size: int = 1280         # larger input improves small-person recall
-min_dwell_time: float = 3.0              # required continuous ROI dwell
-max_allowed_movement: float = 25.0       # foot movement window limit in pixels
+inference_image_size: int = 640          # 960/1280 improve far-person recall, cost FPS
+min_dwell_time: float = 2.0              # required continuous ROI dwell
+max_waiting_speed: float = 0.35          # body-heights/s; faster = walking
+walk_confirm_time: float = 0.4           # motion must last this long to count as walking
+exit_grace: float = 0.7                  # brief step outside the ROI edge is ignored
 max_track_age: float = 1.5               # retain tracks through brief misses
+person_lost_timeout: float = 2.0         # empty lobby this long cancels a floor's call
+idle_return_delay: float = 8.0           # idle car returns to home_floor (1) after this
 roi: tuple[int, int, int, int] = (280, 220, 1000, 700)  # left, top, right, bottom
 ```
 
@@ -74,10 +79,10 @@ very close to the camera and their lower body is clipped by the frame, the
 detection also counts when its box crosses the ROI's lower edge and its
 horizontal center is inside the ROI.
 
-The detector is restricted to the YOLO person class and uses a 1280-pixel inference
-size by default. This improves recall for smaller or more distant people compared
-with the common 640-pixel default, at the cost of lower FPS. If the camera cannot
-maintain a usable frame rate, reduce it to `960` or `640`.
+The detector is restricted to the YOLO person class and uses a 640-pixel inference
+size by default so several floor cameras can run on one CPU. If small or distant
+people are missed, raise it to `960` or `1280` (`--inference-image-size`) at the
+cost of FPS.
 
 ## Waiting-person logic
 
@@ -85,26 +90,29 @@ The live loop uses Ultralytics ByteTrack with `persist=True`, so every person
 keeps an independent tracking ID. Each track has an explicit state:
 `OUTSIDE`, `ENTERED`, `WAITING`, `WALKING THROUGH`, or `VALID WAITING`.
 
-When a tracked foot first enters the ROI, its `entry_time` is recorded. The
-track becomes `VALID WAITING` only after continuous in-ROI dwell reaches
-`min_dwell_time` (3 seconds by default). Leaving the ROI resets the timer.
-Movement is measured over a short window using foot positions; movement above
-`max_allowed_movement` marks the track `WALKING THROUGH` and restarts its dwell
-timer. This rejects people walking across the zone while tolerating small
-natural movements.
+- **Dwell**: a track becomes `VALID WAITING` after `min_dwell_time` seconds
+  with its feet (bottom-centre of the box) in the ROI.
+- **Walking vs. waiting**: the foot position is smoothed, and its net drift
+  over `motion_window` is divided by the person's box height. The result is a
+  speed in *body-heights per second*, so the same `max_waiting_speed` works for
+  a person close to the camera and one far away. Normal walking is about
+  0.6–0.9; someone standing, turning or shifting weight stays well below 0.35.
+- **Hysteresis**: motion must exceed the limit for `walk_confirm_time` before a
+  track is `WALKING THROUGH` (one jumpy detection does not reset the dwell);
+  feet may leave the ROI for `exit_grace` seconds without ending the visit;
+  a missed detection is tolerated for `max_track_age` seconds.
+- `max_allowed_movement` is an optional extra pixel cap on drift (off by default).
 
-The only controller output is `WAITING_PERSON`. It is true when at least one
-independent track is `VALID WAITING`. If multiple tracks are valid, the
-analyzer selects the person closest to the camera, using the detected
-bounding-box height as the camera-proximity signal, and returns:
+The controller output is `WAITING_PERSON`: true when at least one track is
+`VALID WAITING`. If several are valid, the person closest to the camera
+(largest box) is reported:
 
 ```python
-{"waiting_person": True, "person_id": 21, "dwell_time": 4.2}
+{"waiting_person": True, "person_id": 21, "dwell_time": 4.2, "people_in_zone": 1}
 ```
 
-A short detector miss is tolerated for up to `max_track_age` seconds to prevent
-one bad frame from creating a false negative. The live console prints the same
-state as `WAITING_PERSON = TRUE/FALSE`.
+`people_in_zone` counts everyone currently in the waiting area (waiting or not);
+the lift uses it to notice that the lobby has emptied.
 
 ## Run
 
@@ -149,57 +157,71 @@ This line is the Step 2 integration contract. A later controller can consume the
 
 ## Browser lift simulation
 
-Run the YOLO-backed five-floor browser simulation:
-
-```powershell
-python -m smart_elevator.web_server --camera 0 --camera-floor 1 --port 8000
+```bash
+# Laptop webcam on floor 1, an IP-camera app on floor 3, HTTPS for phones:
+python -m smart_elevator.web_server --https \
+    --floor-camera 1=0 \
+    --floor-camera 3=http://192.168.1.20:8080/video
 ```
 
-Open <http://127.0.0.1:8000>. The page has three panels:
+The server listens on all interfaces and prints the LAN address. Open it on
+the laptop (accept the self-signed certificate warning once). The dashboard has:
 
-1. **CCTV**: the annotated YOLO feed, `WAITING_PERSON`, track ID, dwell time, and
-   a selector for the floor the camera is mounted on.
-2. **Hoistway cross-section**: every landing has a floor plate, a hall position
-   indicator, UP/DOWN hall lanterns, and UP/DOWN call buttons. The shaft shows the
-   cabin with sliding doors, cable, counterweight, and machine room.
-3. **Car operating panel**: floor/direction display, illuminated cabin buttons,
-   the planned LOOK service order, and an event log.
+1. **CCTV + floor cameras**: the annotated YOLO feed of the selected floor and
+   one row per floor to switch its camera **Off / Webcam index / Stream URL /
+   Phone-browser**, with live status (OFFLINE, ONLINE, PERSON, WAITING).
+2. **Hoistway cross-section** with hall buttons, lanterns, and the car.
+3. **Car operating panel**, the planned LOOK service order, and an event log.
 
-### LOOK scheduling
+### Connecting another device's camera
 
-`lift_controller.LookController` runs one car with the LOOK algorithm:
+- **Any phone/laptop browser** (no app): start the server with `--https`, then
+  on the device open `https://<laptop-ip>:8000/camera`, accept the certificate
+  warning, pick the floor, and press *Start streaming*. The floor's camera is
+  enabled automatically. Browsers only allow camera access over HTTPS, which is
+  why `--https` generates a self-signed certificate in `certs/` (via `openssl`).
+  If the laptop's IP changes, delete `certs/` so it is regenerated.
+- **IP-camera apps** (IP Webcam, DroidCam, RTSP CCTV): choose *Stream URL* for
+  the floor and paste the app's video URL, e.g. `http://192.168.1.20:8080/video`
+  or `rtsp://…`. Streams reconnect automatically.
+- **USB webcams** on the server: choose *Webcam index* (`0`, `1`, …).
 
-- **Hall calls** are UP/DOWN buttons on a landing; **car calls** are cabin buttons.
-- The car keeps its direction while any call lies ahead of it. On the way it
-  stops for car calls and for hall calls going the same way.
-- When nothing is left ahead, it turns around at the last call instead of
-  running to the end of the shaft. A hall call in the opposite direction at that
-  floor is served there.
-- At each stop the doors open (`door_transition_time`), stay open
-  (`door_open_time`), and close before the car moves again. Pressing a call
-  for the current floor reopens the doors.
-- Example: car at floor 1, car call 4, hall UP at 2, hall DOWN at 3 → stops 2, 4, 3.
+Every camera has its own YOLO tracker. The ROI in `config.py` is defined for a
+1280×720 image and is scaled to each source's resolution, so mount every
+camera with a similar view of the waiting area. On CPU, several cameras at
+`inference_image_size=640` are practical; raise it only if far people are missed.
 
-Speed, door times, and floor count live in `AppConfig`
-(`lift_speed_floors_per_second`, `door_open_time`, `door_transition_time`,
-`num_floors`).
+### Lift behaviour
 
-### Camera gating
+- **Floors with a camera**: the hall button is accepted only while that floor
+  reports `WAITING_PERSON = TRUE` (and rejected while the camera is offline).
+  The accepted call is served in **either direction**: the car stops on its way
+  up or down. If the waiting area stays empty for `person_lost_timeout`
+  seconds before the car arrives, the call is cancelled and the car continues
+  to its next call.
+- **Floors without a camera** and **cabin buttons** work as normal LOOK calls.
+- **Idle return**: when there are no calls for `idle_return_delay` seconds and
+  the car is away from floor 1, it returns to floor 1 (doors stay closed) and
+  stops for any button pressed on the way; a call behind it takes over.
 
-Only **hall calls on the camera floor** depend on YOLO. Such a call is rejected
-unless `WAITING_PERSON = TRUE`. If the person leaves before the car arrives,
-the call is cancelled. Hall calls on other floors and all car calls are never
-gated.
+`lift_controller.LookController` runs the LOOK algorithm: the car keeps its
+direction while calls lie ahead, stops for car calls, floor calls, and hall
+calls in its direction, and turns around at the last call. Example: car at
+floor 1, car call 4, hall UP at 2, hall DOWN at 3 → stops 2, 4, 3.
 
 ### HTTP API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/status` | Car position, direction, doors, calls, planned stops, events, camera status |
-| GET | `/video_feed` | Annotated MJPEG stream |
+| GET | `/api/status` | Car, doors, calls, plan, events, and all camera statuses |
+| GET | `/api/cameras` | Per-floor camera statuses |
+| POST | `/api/cameras/{floor}` | Enable a camera: `{"kind": "local"\|"url"\|"browser", "source": "0"}` |
+| DELETE | `/api/cameras/{floor}` | Disable a floor's camera |
+| POST | `/api/cameras/{floor}/frame` | Push one JPEG frame (body) from a device |
+| GET | `/video_feed/{floor}` | Annotated MJPEG stream for a floor |
+| GET | `/camera` | Page that turns a phone/laptop into a floor camera |
 | POST | `/api/hall/{floor}/{up\|down}` | Landing call |
 | POST | `/api/car/{floor}` | Cabin call |
-| POST | `/api/camera-floor/{floor}` | Move the camera to another floor |
 
 ## Tests
 
@@ -209,14 +231,15 @@ The tests use synthetic bounding boxes and track IDs, so they do not require a w
 python -m pytest -q
 ```
 
-The cases cover continuous dwell, walking-through reset, leaving before dwell,
-multiple independent tracks, temporary detector gaps, and foot-position ROI
-membership.
+The cases cover dwell with box jitter, walking and slow strolls, near vs. far
+people, single jumpy detections, ROI-edge grace, multiple tracks, detector
+gaps, floor calls in both directions, idle return to floor 1, and camera
+gating/cancellation in the web simulation.
 
 For live testing, use a repeatable scene and verify:
 
 1. Empty ROI prints `WAITING_PERSON = FALSE`.
-2. One person inside becomes valid only after 3 seconds.
+2. One person inside becomes valid only after 2 seconds.
 3. Multiple people are evaluated independently; one valid track makes the result `TRUE`.
 4. A person outside the ROI remains `FALSE`.
 5. A walking person crossing the ROI remains `FALSE`.

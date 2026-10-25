@@ -19,6 +19,19 @@ except ImportError:  # Supports running main.py directly from this directory.
     from tracking import TrackStatus, WaitingPersonAnalyzer, WaitingResult
 
 
+def build_analyzer(app_config: AppConfig) -> WaitingPersonAnalyzer:
+    return WaitingPersonAnalyzer(
+        roi=ROI.from_tuple(app_config.roi),
+        min_dwell_time=app_config.min_dwell_time,
+        max_waiting_speed=app_config.max_waiting_speed,
+        max_allowed_movement=app_config.max_allowed_movement,
+        walk_confirm_time=app_config.walk_confirm_time,
+        exit_grace=app_config.exit_grace,
+        max_track_age=app_config.max_track_age,
+        motion_window=app_config.motion_window,
+    )
+
+
 def draw_overlay(
     frame,
     detections,
@@ -27,7 +40,7 @@ def draw_overlay(
     result: WaitingResult,
     fps,
     threshold,
-    max_allowed_movement,
+    max_waiting_speed,
     min_dwell_time,
 ):
     """Draw detections and operator-facing state on a frame."""
@@ -52,7 +65,7 @@ def draw_overlay(
             "WAITING": (0, 220, 255),
             "WALKING THROUGH": (0, 140, 255),
         }.get(state, (160, 160, 160))
-        movement = track_status.movement if track_status else 0.0
+        speed = track_status.speed if track_status else 0.0
         duration = track_status.dwell_time if track_status else 0.0
         track_label = "?" if detection.track_id is None else str(detection.track_id)
         label = f"Person #{track_label} {detection.confidence:.2f}"
@@ -68,7 +81,7 @@ def draw_overlay(
         )
         cv2.putText(
             frame,
-            f"{state} {duration:.1f}s d={movement:.1f}px",
+            f"{state} {duration:.1f}s v={speed:.2f}",
             (left, min(frame.shape[0] - 10, bottom + 22)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.48,
@@ -90,7 +103,7 @@ def draw_overlay(
     )
     cv2.putText(
         frame,
-        f"FPS: {fps:.1f}  Foot movement <= {max_allowed_movement:.1f}px  Dwell >= {min_dwell_time:.1f}s",
+        f"FPS: {fps:.1f}  Speed <= {max_waiting_speed:.2f} body/s  Dwell >= {min_dwell_time:.1f}s",
         (20, 105),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.65,
@@ -123,7 +136,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="YOLO inference size; larger values improve small-person recall but reduce FPS",
     )
     parser.add_argument("--min-dwell-time", type=float, default=CONFIG.min_dwell_time)
-    parser.add_argument("--max-allowed-movement", type=float, default=CONFIG.max_allowed_movement)
+    parser.add_argument(
+        "--max-waiting-speed",
+        type=float,
+        default=CONFIG.max_waiting_speed,
+        help="Foot speed (body-heights/s) above which a person counts as walking",
+    )
+    parser.add_argument(
+        "--max-allowed-movement",
+        type=float,
+        default=CONFIG.max_allowed_movement,
+        help="Optional pixel cap on foot drift over the motion window",
+    )
+    parser.add_argument("--walk-confirm-time", type=float, default=CONFIG.walk_confirm_time)
+    parser.add_argument("--exit-grace", type=float, default=CONFIG.exit_grace)
     parser.add_argument("--max-track-age", type=float, default=CONFIG.max_track_age)
     parser.add_argument("--motion-window", type=float, default=CONFIG.motion_window)
     parser.add_argument(
@@ -145,7 +171,10 @@ def config_from_args(args: argparse.Namespace) -> AppConfig:
         confidence_threshold=args.confidence,
         inference_image_size=args.inference_image_size,
         min_dwell_time=args.min_dwell_time,
+        max_waiting_speed=args.max_waiting_speed,
         max_allowed_movement=args.max_allowed_movement,
+        walk_confirm_time=args.walk_confirm_time,
+        exit_grace=args.exit_grace,
         max_track_age=args.max_track_age,
         motion_window=args.motion_window,
         roi=args.roi,
@@ -162,13 +191,7 @@ def run(app_config: AppConfig = CONFIG) -> None:
         device=app_config.device,
         inference_image_size=app_config.inference_image_size,
     )
-    analyzer = WaitingPersonAnalyzer(
-        roi=roi,
-        min_dwell_time=app_config.min_dwell_time,
-        max_allowed_movement=app_config.max_allowed_movement,
-        max_track_age=app_config.max_track_age,
-        motion_window=app_config.motion_window,
-    )
+    analyzer = build_analyzer(app_config)
     camera = cv2.VideoCapture(parse_camera_source(app_config.camera_source))
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, app_config.image_width)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, app_config.image_height)
@@ -212,7 +235,7 @@ def run(app_config: AppConfig = CONFIG) -> None:
                 waiting_result,
                 fps,
                 app_config.confidence_threshold,
-                app_config.max_allowed_movement,
+                app_config.max_waiting_speed,
                 app_config.min_dwell_time,
             )
             cv2.imshow(app_config.window_name, frame)

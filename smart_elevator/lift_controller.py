@@ -5,6 +5,11 @@ unit-tested with synthetic ticks.  The lift keeps travelling in its current
 direction while any call lies ahead of it, stopping at floors with a car call
 or a hall call in the travel direction.  When nothing remains ahead it turns
 around (LOOK), rather than running to the end of the shaft (SCAN).
+
+*Floor calls* are camera-verified landing calls: the car stops for them in
+either direction.  When idle away from ``home_floor`` for
+``idle_return_delay`` seconds the car returns home, serving any call
+registered on the way.
 """
 
 from __future__ import annotations
@@ -48,10 +53,14 @@ class LookController:
         door_open_time: float = 3.0,
         door_transition_time: float = 1.0,
         start_floor: int = 1,
+        home_floor: int = 1,
+        idle_return_delay: float | None = None,
     ) -> None:
         if num_floors < 2:
             raise ValueError("num_floors must be at least 2")
         self.num_floors = num_floors
+        if home_floor < 1 or home_floor > num_floors:
+            raise ValueError(f"home_floor must be between 1 and {num_floors}")
         self.speed = speed
         self.door_open_time = door_open_time
         self.door_transition_time = door_transition_time
@@ -62,6 +71,11 @@ class LookController:
         self.door_timer = 0.0
         self.hall_calls: set[tuple[int, Direction]] = set()
         self.car_calls: set[int] = set()
+        self.floor_calls: set[int] = set()
+        self.home_floor = home_floor
+        self.idle_return_delay = idle_return_delay
+        self.idle_time = 0.0
+        self.homing = False
         self.stops: deque[int] = deque(maxlen=50)
         self.events: deque[dict[str, Any]] = deque(maxlen=12)
 
@@ -86,7 +100,7 @@ class LookController:
             self.car_calls.add(floor)
             self.log(f"Car call registered: floor {floor}")
 
-    def add_hall_call(self, floor: int, direction: Direction) -> None:
+    def validate_hall_call(self, floor: int, direction: Direction) -> Direction:
         self._validate_floor(floor)
         direction = Direction(direction)
         if direction is Direction.IDLE:
@@ -95,6 +109,27 @@ class LookController:
             raise ValueError("Top floor has no UP hall call")
         if direction is Direction.DOWN and floor == 1:
             raise ValueError("Bottom floor has no DOWN hall call")
+        return direction
+
+    def add_floor_call(self, floor: int) -> None:
+        """Register a landing call the car serves in either travel direction."""
+        self._validate_floor(floor)
+        if not self.moving and self.current_floor == floor:
+            self._reopen_doors()
+            return
+        if floor not in self.floor_calls:
+            self.floor_calls.add(floor)
+            self.log(f"Floor call registered: floor {floor} (person verified)")
+
+    def cancel_floor_call(self, floor: int, reason: str) -> bool:
+        if floor not in self.floor_calls:
+            return False
+        self.floor_calls.discard(floor)
+        self.log(f"Floor {floor} call cancelled: {reason}")
+        return True
+
+    def add_hall_call(self, floor: int, direction: Direction) -> None:
+        direction = self.validate_hall_call(floor, direction)
         if (
             not self.moving
             and self.current_floor == floor
@@ -117,10 +152,13 @@ class LookController:
         return True
 
     def has_calls(self) -> bool:
-        return bool(self.hall_calls or self.car_calls)
+        return bool(self.hall_calls or self.car_calls or self.floor_calls)
 
     def _call_floors(self) -> set[int]:
-        return self.car_calls | {floor for floor, _ in self.hall_calls}
+        floors = self.car_calls | self.floor_calls | {floor for floor, _ in self.hall_calls}
+        if self.homing:
+            floors.add(self.home_floor)
+        return floors
 
     def _calls_beyond(self, floor: int, direction: Direction) -> bool:
         if direction is Direction.UP:
@@ -135,13 +173,34 @@ class LookController:
         if elapsed <= 0:
             return
         if self.door_state is not DoorState.CLOSED:
+            self.idle_time = 0.0
             self._advance_doors(elapsed)
             return
+        self._update_homing(elapsed)
         if not self.moving:
             self._decide_at_floor()
             if not self.moving:
                 return
         self._move(elapsed)
+
+    def _update_homing(self, elapsed: float) -> None:
+        """Start a return to ``home_floor`` after idling; real calls take over."""
+        if self.has_calls():
+            self.idle_time = 0.0
+            self.homing = False
+            return
+        if self.homing:
+            if not self.moving and self.current_floor == self.home_floor:
+                self.homing = False
+            return
+        if self.moving or self.current_floor == self.home_floor:
+            self.idle_time = 0.0
+            return
+        self.idle_time += elapsed
+        if self.idle_return_delay is not None and self.idle_time >= self.idle_return_delay:
+            self.homing = True
+            self.idle_time = 0.0
+            self.log(f"No one waiting: returning to floor {self.home_floor}")
 
     def _advance_doors(self, elapsed: float) -> None:
         self.door_timer += elapsed
@@ -165,7 +224,7 @@ class LookController:
         self.log(f"Doors opened at floor {self.current_floor}")
 
     def _should_stop(self, floor: int, direction: Direction) -> bool:
-        if floor in self.car_calls:
+        if floor in self.car_calls or floor in self.floor_calls:
             return True
         if direction is Direction.IDLE:
             return any(f == floor for f, _ in self.hall_calls)
@@ -211,9 +270,13 @@ class LookController:
                 self._stop_at(floor)
                 return
             if not self._calls_beyond(floor, self.direction):
-                # Calls were cancelled mid-travel: park at the next floor.
+                # Calls were cancelled mid-travel (or homing ended): park here.
                 self.position = float(floor)
                 self.moving = False
+                if self.homing and floor == self.home_floor:
+                    self.homing = False
+                    self.direction = Direction.IDLE
+                    self.log(f"Parked at floor {floor}")
                 return
         self.position = min(max(end, 1.0), float(self.num_floors))
 
@@ -222,6 +285,7 @@ class LookController:
         direction = self.direction
         self.moving = False
         self.car_calls.discard(floor)
+        self.floor_calls.discard(floor)
         if direction is Direction.IDLE:
             if (floor, Direction.UP) in self.hall_calls:
                 direction = Direction.UP
@@ -247,6 +311,8 @@ class LookController:
         clone = copy.copy(self)
         clone.hall_calls = set(self.hall_calls)
         clone.car_calls = set(self.car_calls)
+        clone.floor_calls = set(self.floor_calls)
+        clone.homing = False
         clone.stops = deque()
         clone.events = deque(maxlen=1)
         clone.speed = 1.0
@@ -282,6 +348,9 @@ class LookController:
                 for floor, direction in sorted(self.hall_calls)
             ],
             "car_calls": sorted(self.car_calls),
+            "floor_calls": sorted(self.floor_calls),
+            "homing": self.homing,
+            "home_floor": self.home_floor,
             "planned_stops": self.planned_stops(),
             "events": list(self.events),
         }

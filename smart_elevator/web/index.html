@@ -25,13 +25,13 @@
 
   <main class="dashboard">
     <section class="panel cctv-panel">
-      <div class="panel-heading"><h2>CCTV · Lobby camera</h2><span id="cameraFloorLabel">FLOOR 1</span></div>
+      <div class="panel-heading"><h2>CCTV · Lobby cameras</h2><span id="cameraFloorLabel">FLOOR 1</span></div>
       <div class="cctv">
-        <img src="/video_feed" alt="Live YOLO camera feed">
+        <img id="feed" alt="Live YOLO camera feed">
         <div class="cctv-overlay">
           <span class="rec"><i></i>REC</span>
           <span id="cctvTime" class="cctv-time"></span>
-          <span id="cctvCam" class="cctv-cam">CAM 01 · FLOOR 1</span>
+          <span id="cctvCam" class="cctv-cam">FLOOR 1</span>
         </div>
         <div id="noSignal" class="no-signal" hidden><strong>NO SIGNAL</strong><span id="cameraError"></span></div>
       </div>
@@ -39,13 +39,12 @@
         <div><span class="label">WAITING_PERSON</span><strong id="waitingValue">FALSE</strong></div>
         <div><span class="label">TRACK ID</span><strong id="personValue">—</strong></div>
         <div><span class="label">DWELL</span><strong id="dwellValue">0.0s</strong></div>
-        <div><span class="label">TRACKS</span><strong id="trackCount">0</strong></div>
+        <div><span class="label">IN ZONE</span><strong id="trackCount">0</strong></div>
       </div>
-      <div class="camera-floor">
-        <span class="label">CAMERA MOUNTED ON FLOOR</span>
-        <div id="cameraFloorButtons" class="segmented" role="group" aria-label="Camera floor"></div>
-      </div>
-      <p class="note">Hall calls on the camera floor are accepted only while YOLO confirms a waiting person, and are cancelled if that person leaves before the car arrives. Other floors and cabin calls are not gated.</p>
+      <h3>Floor cameras</h3>
+      <div id="cameraRows" class="camera-rows"></div>
+      <p class="note">On a floor with a camera, the hall button works only while YOLO confirms someone is <em>waiting</em> (not walking past). The lift then stops there in either direction; if the person leaves the lobby the call is cancelled and the lift moves on. With nobody waiting, the idle lift returns to floor 1.</p>
+      <p class="note">Phone or laptop camera: open <code id="phoneLink"></code> on that device (HTTPS required — start the server with <code>--https</code>). IP camera apps: choose “Stream URL”.</p>
     </section>
 
     <section class="panel building-panel">
