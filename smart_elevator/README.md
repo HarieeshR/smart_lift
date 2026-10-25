@@ -64,9 +64,10 @@ These values live in the `AppConfig` defaults. For a CCTV stream, use a string U
 The default ROI is a wider waiting zone directly in front of the elevator, while
 still excluding the outer edges of the camera frame. Calibrate it against the
 displayed image. Membership is
-based only on the bottom-center (foot position) of the bounding box. A detection
-counts only when its confidence is at least `0.60` and that foot position lies
-inside the ROI.
+based on the bottom-center (foot position) of the bounding box. If a person is
+very close to the camera and their lower body is clipped by the frame, the
+detection also counts when its box crosses the ROI's lower edge and its
+horizontal center is inside the ROI.
 
 The detector is restricted to the YOLO person class and uses a 1280-pixel inference
 size by default. This improves recall for smaller or more distant people compared
@@ -88,7 +89,9 @@ timer. This rejects people walking across the zone while tolerating small
 natural movements.
 
 The only controller output is `WAITING_PERSON`. It is true when at least one
-independent track is `VALID WAITING`, and the analyzer returns:
+independent track is `VALID WAITING`. If multiple tracks are valid, the
+analyzer selects the person closest to the camera, using the detected
+bounding-box height as the camera-proximity signal, and returns:
 
 ```python
 {"waiting_person": True, "person_id": 21, "dwell_time": 4.2}
@@ -139,6 +142,28 @@ WAITING_PERSON = TRUE {'waiting_person': True, 'person_id': 21, 'dwell_time': 3.
 
 This line is the Step 2 integration contract. A later controller can consume the Boolean state or a serial/MQTT adapter can forward it; no elevator movement is implemented here.
 
+## Browser lift simulation
+
+Run the YOLO-backed five-floor browser simulation:
+
+```powershell
+python -m smart_elevator.web_server --camera 0 --camera-floor 1
+```
+
+Open <http://127.0.0.1:8000>. The page has three columns:
+
+1. the annotated YOLO camera feed and `WAITING_PERSON` state
+2. a five-floor lift shaft showing its current direction and floor
+3. floor request buttons and active requests
+
+The camera is associated with `--camera-floor` for display and future
+multi-camera expansion. Selecting a floor request assigns the camera to that
+floor. A request is accepted only while `WAITING_PERSON = TRUE`; otherwise it
+is cancelled immediately and cannot start later when a person appears. If the
+waiting signal disappears while the lift is travelling, the active request is
+also cancelled. The lift moves continuously between floors at 0.5 floors per
+second by default; it does not stop at intermediate floors.
+
 ## Tests
 
 The tests use synthetic bounding boxes and track IDs, so they do not require a webcam, YOLO weights, or a GUI:
@@ -165,3 +190,7 @@ For live testing, use a repeatable scene and verify:
 10. Put one standing person inside and one outside; the result must be `TRUE`.
 
 For reliability before hardware integration, record representative daytime/nighttime clips, tune the threshold and ROI, and measure false positives, false negatives, and FPS on the target computer.
+
+
+
+.\.venv\Scripts\python.exe -m smart_elevator.web_server --camera 0 --camera-floor 1 --port 8000

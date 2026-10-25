@@ -5,9 +5,9 @@ from smart_elevator.tracking import WaitingPersonAnalyzer, WaitingState
 WAITING_ROI = ROI.from_tuple((0, 0, 500, 500))
 
 
-def person(foot_x, track_id=1, bottom=400, confidence=0.9):
+def person(foot_x, track_id=1, top=100, bottom=400, confidence=0.9):
     return Detection(
-        box=(foot_x - 10, 100, foot_x + 10, bottom),
+        box=(foot_x - 10, top, foot_x + 10, bottom),
         confidence=confidence,
         track_id=track_id,
     )
@@ -99,6 +99,68 @@ def test_multiple_people_are_tracked_independently():
     assert statuses[1].state is WaitingState.VALID
 
 
+def test_closer_valid_person_is_selected_over_farther_person():
+    analyzer = WaitingPersonAnalyzer(
+        WAITING_ROI, min_dwell_time=1, max_track_age=3
+    )
+
+    analyzer.update(
+        [
+            person(100, track_id=1, top=100, bottom=400),
+            person(300, track_id=2, top=250, bottom=400),
+        ],
+        timestamp=0.0,
+    )
+    analyzer.update(
+        [
+            person(100, track_id=1, top=100, bottom=400),
+            person(300, track_id=2, top=250, bottom=400),
+        ],
+        timestamp=1.0,
+    )
+    _, result = analyzer.update(
+        [
+            person(100, track_id=1, top=100, bottom=400),
+            person(300, track_id=2, top=250, bottom=400),
+        ],
+        timestamp=1.1,
+    )
+
+    assert result.waiting_person
+    assert result.person_id == 1
+
+
+def test_closer_person_wins_even_with_shorter_dwell():
+    analyzer = WaitingPersonAnalyzer(
+        WAITING_ROI, min_dwell_time=1, max_track_age=3
+    )
+
+    analyzer.update(
+        [
+            person(600, track_id=1, top=100, bottom=400),
+            person(300, track_id=2, top=250, bottom=400),
+        ],
+        timestamp=0.0,
+    )
+    analyzer.update(
+        [
+            person(100, track_id=1, top=100, bottom=400),
+            person(300, track_id=2, top=250, bottom=400),
+        ],
+        timestamp=1.0,
+    )
+    analyzer.update([person(300, track_id=2, top=250, bottom=400)], timestamp=2.0)
+    _, result = analyzer.update(
+        [
+            person(100, track_id=1, top=100, bottom=400),
+            person(300, track_id=2, top=250, bottom=400),
+        ],
+        timestamp=2.1,
+    )
+
+    assert result.person_id == 1
+
+
 def test_short_detection_gap_keeps_valid_result():
     analyzer = WaitingPersonAnalyzer(
         WAITING_ROI, min_dwell_time=1, max_track_age=1
@@ -118,6 +180,18 @@ def test_foot_position_not_box_center_controls_roi():
     analyzer = WaitingPersonAnalyzer(WAITING_ROI, min_dwell_time=1)
     detection = Detection(
         box=(250, -300, 350, 400), confidence=0.9, track_id=1
+    )
+
+    statuses, result = analyzer.update([detection], timestamp=0.0)
+
+    assert statuses[0].inside_roi
+    assert not result.waiting_person
+
+
+def test_bottom_truncated_person_is_inside_when_box_crosses_roi_edge():
+    analyzer = WaitingPersonAnalyzer(WAITING_ROI, min_dwell_time=1)
+    detection = Detection(
+        box=(200, 100, 300, 600), confidence=0.9, track_id=1
     )
 
     statuses, result = analyzer.update([detection], timestamp=0.0)

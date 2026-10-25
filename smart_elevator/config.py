@@ -20,6 +20,8 @@ class AppConfig:
     max_allowed_movement: float = 25.0
     max_track_age: float = 1.5
     motion_window: float = 0.75
+    lift_update_interval: float = 0.05
+    lift_speed_floors_per_second: float = 0.5
     roi: Tuple[int, int, int, int] = (280, 220, 1000, 700)
     window_name: str = "Smart Elevator Person Detection"
     image_width: int = 1280

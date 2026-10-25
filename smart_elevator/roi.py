@@ -53,8 +53,16 @@ class ROI:
         return self.left <= x <= self.right and self.top <= y <= self.bottom
 
     def contains_detection(self, detection: Detection) -> bool:
-        """Use bottom-center so a standing person's feet define their location."""
-        return self.contains(detection.bottom_center)
+        """Check feet, including a person whose lower body is frame-truncated."""
+        if self.contains(detection.foot_position):
+            return True
+
+        left, top, right, bottom = detection.box
+        center_x = (left + right) / 2.0
+        return (
+            self.left <= center_x <= self.right
+            and top < self.bottom <= bottom
+        )
 
     def as_tuple(self) -> tuple[int, int, int, int]:
         return self.left, self.top, self.right, self.bottom

@@ -51,6 +51,7 @@ class TrackStatus:
 class _TrackState:
     previous_foot: tuple[float, float]
     recent_feet: deque[tuple[float, tuple[float, float]]]
+    box_height: float
     entry_time: float | None = None
     state: WaitingState = WaitingState.OUTSIDE
     last_seen: float = 0.0
@@ -113,8 +114,8 @@ class WaitingPersonAnalyzer:
         foot: tuple[float, float],
         movement: float,
         timestamp: float,
+        inside: bool,
     ) -> TrackStatus:
-        inside = self.roi.contains(foot)
         dwell = (
             0.0
             if state.entry_time is None
@@ -134,12 +135,13 @@ class WaitingPersonAnalyzer:
                 continue
             track_id = detection.track_id
             foot = detection.foot_position
-            inside = self.roi.contains(foot)
+            inside = self.roi.contains_detection(detection)
             state = self._tracks.get(track_id)
             if state is None or timestamp - state.last_seen > self.max_track_age:
                 state = _TrackState(
                     previous_foot=foot,
                     recent_feet=deque([(timestamp, foot)]),
+                    box_height=max(0.0, detection.box[3] - detection.box[1]),
                     entry_time=timestamp if inside else None,
                     state=WaitingState.ENTERED if inside else WaitingState.OUTSIDE,
                     last_seen=timestamp,
@@ -168,8 +170,13 @@ class WaitingPersonAnalyzer:
                 else:
                     state.state = WaitingState.WAITING
                 state.previous_foot = foot
+                state.box_height = max(
+                    0.0, detection.box[3] - detection.box[1]
+                )
                 state.last_seen = timestamp
-            statuses.append(self._status(track_id, state, foot, movement, timestamp))
+            statuses.append(
+                self._status(track_id, state, foot, movement, timestamp, inside)
+            )
 
         expired = [
             track_id
@@ -188,11 +195,14 @@ class WaitingPersonAnalyzer:
         if valid:
             person_id, person_state = max(
                 valid,
-                key=lambda item: timestamp
-                - (
-                    item[1].entry_time
-                    if item[1].entry_time is not None
-                    else timestamp
+                key=lambda item: (
+                    item[1].box_height,
+                    timestamp
+                    - (
+                        item[1].entry_time
+                        if item[1].entry_time is not None
+                        else timestamp
+                    ),
                 ),
             )
             entry_time = (
