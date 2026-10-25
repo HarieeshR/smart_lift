@@ -22,6 +22,9 @@ class AppConfig:
     motion_window: float = 0.75
     lift_update_interval: float = 0.05
     lift_speed_floors_per_second: float = 0.5
+    num_floors: int = 5
+    door_open_time: float = 3.0
+    door_transition_time: float = 1.0
     roi: Tuple[int, int, int, int] = (280, 220, 1000, 700)
     window_name: str = "Smart Elevator Person Detection"
     image_width: int = 1280

@@ -4,52 +4,93 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Smart Elevator Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&family=Share+Tech+Mono&display=swap">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <p class="eyebrow">YOLO + BYTETRACK</p>
-      <h1>Smart Elevator Simulation</h1>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span>▲</span><span>▼</span></div>
+      <div>
+        <p class="eyebrow">YOLO11 · BYTETRACK · LOOK SCHEDULER</p>
+        <h1>Smart Elevator Control</h1>
+      </div>
     </div>
-    <div id="globalStatus" class="status-pill idle">NO WAITING PERSON</div>
+    <div class="topbar-right">
+      <div id="globalStatus" class="status-pill idle"><i></i><span>NO WAITING PERSON</span></div>
+      <div class="clock" id="clock">--:--:--</div>
+    </div>
   </header>
+
   <main class="dashboard">
-    <section class="panel camera-panel">
-      <div class="panel-heading"><h2>01 / Camera detection</h2><span id="cameraFloor">CAMERA / FLOOR 1</span></div>
-      <div class="camera-frame"><img src="/video_feed" alt="Live YOLO camera feed"><div class="scanline"></div></div>
-      <div class="camera-meta">
-        <div><span class="muted">WAITING_PERSON</span><strong id="waitingValue">FALSE</strong></div>
-        <div><span class="muted">TRACK</span><strong id="personValue">—</strong></div>
-        <div><span class="muted">DWELL</span><strong id="dwellValue">0.0s</strong></div>
-      </div>
-      <p id="eventLog" class="event-log">Camera starting</p>
-      <p id="cameraError" class="error"></p>
-    </section>
-
-    <section class="panel lift-panel">
-      <div class="panel-heading"><h2>02 / Lift position</h2><span id="direction">IDLE</span></div>
-      <div class="shaft">
-        <div class="floor-lines">
-          <span>5</span><span>4</span><span>3</span><span>2</span><span>1</span>
+    <section class="panel cctv-panel">
+      <div class="panel-heading"><h2>CCTV · Lobby camera</h2><span id="cameraFloorLabel">FLOOR 1</span></div>
+      <div class="cctv">
+        <img src="/video_feed" alt="Live YOLO camera feed">
+        <div class="cctv-overlay">
+          <span class="rec"><i></i>REC</span>
+          <span id="cctvTime" class="cctv-time"></span>
+          <span id="cctvCam" class="cctv-cam">CAM 01 · FLOOR 1</span>
         </div>
-        <div id="lift" class="lift"><span class="lift-number">LIFT</span><span id="liftDirection">IDLE</span></div>
+        <div id="noSignal" class="no-signal" hidden><strong>NO SIGNAL</strong><span id="cameraError"></span></div>
       </div>
-      <div class="lift-readout"><span class="muted">CURRENT FLOOR</span><strong id="currentFloor">1</strong><span class="muted">TARGET</span><strong id="targetFloor">—</strong></div>
+      <div class="readouts">
+        <div><span class="label">WAITING_PERSON</span><strong id="waitingValue">FALSE</strong></div>
+        <div><span class="label">TRACK ID</span><strong id="personValue">—</strong></div>
+        <div><span class="label">DWELL</span><strong id="dwellValue">0.0s</strong></div>
+        <div><span class="label">TRACKS</span><strong id="trackCount">0</strong></div>
+      </div>
+      <div class="camera-floor">
+        <span class="label">CAMERA MOUNTED ON FLOOR</span>
+        <div id="cameraFloorButtons" class="segmented" role="group" aria-label="Camera floor"></div>
+      </div>
+      <p class="note">Hall calls on the camera floor are accepted only while YOLO confirms a waiting person, and are cancelled if that person leaves before the car arrives. Other floors and cabin calls are not gated.</p>
     </section>
 
-    <section class="panel request-panel">
-      <div class="panel-heading"><h2>03 / Floor requests</h2><span>5 FLOORS</span></div>
-      <p class="help">Select a floor to assign the camera to that floor. The request waits until YOLO confirms a person; if that person leaves while the lift is moving, the request is cancelled before the stop.</p>
-      <div class="floor-buttons">
-        <button data-floor="5">REQUEST <b>FLOOR 5</b><span>↑</span></button>
-        <button data-floor="4">REQUEST <b>FLOOR 4</b><span>↑</span></button>
-        <button data-floor="3">REQUEST <b>FLOOR 3</b><span>↑</span></button>
-        <button data-floor="2">REQUEST <b>FLOOR 2</b><span>↓</span></button>
-        <button data-floor="1">REQUEST <b>FLOOR 1</b><span>↓</span></button>
+    <section class="panel building-panel">
+      <div class="panel-heading"><h2>Hoistway · cross-section</h2><span id="directionLabel" class="dir-chip">IDLE</span></div>
+      <div class="building" id="building">
+        <div class="roof">
+          <div class="machine">
+            <div id="sheave" class="sheave"></div>
+            <span>MACHINE ROOM</span>
+          </div>
+        </div>
+        <div class="levels">
+          <div id="lobbies" class="lobbies"></div>
+          <div id="shaft" class="shaft">
+            <div class="rail left"></div><div class="rail right"></div>
+            <div id="cable" class="cable"></div>
+            <div id="cwCable" class="cw-cable"></div>
+            <div id="counterweight" class="counterweight"></div>
+            <div id="cabin" class="cabin">
+              <div class="cabin-head"><span id="cabinDisplay">1</span></div>
+              <div class="cabin-body">
+                <div class="interior"><div class="ceiling-light"></div><div class="handrail"></div><div class="mirror"></div></div>
+                <div class="door left"></div><div class="door right"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="pit"><span>PIT</span></div>
       </div>
-      <div id="requestList" class="request-list"></div>
-      <p class="legend"><i class="dot green"></i> valid waiting <i class="dot amber"></i> in transit <i class="dot gray"></i> cancelled</p>
+    </section>
+
+    <section class="panel cop-panel">
+      <div class="panel-heading"><h2>Car operating panel</h2><span id="doorLabel">DOORS CLOSED</span></div>
+      <div class="cop">
+        <div class="cop-display">
+          <span id="copArrow" class="cop-arrow"></span>
+          <span id="copFloor" class="cop-digits">1</span>
+        </div>
+        <div id="carButtons" class="cop-buttons"></div>
+        <div class="cop-plate">LOAD 630 kg · 8 PERSONS</div>
+      </div>
+      <h3>LOOK service order</h3>
+      <div id="plan" class="plan"></div>
+      <h3>Event log</h3>
+      <ol id="events" class="events"></ol>
     </section>
   </main>
   <script src="/app.js"></script>

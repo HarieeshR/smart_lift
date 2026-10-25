@@ -10,6 +10,9 @@ smart_elevator/
 ├── detector.py              # YOLO adapter
 ├── roi.py                   # Geometry and presence decision
 ├── tracking.py              # ByteTrack IDs and waiting-person state machine
+├── lift_controller.py       # LOOK scheduler, hall/car calls, door timing
+├── web_server.py            # Browser lift simulation (camera + LOOK controller)
+├── web/                     # Simulation UI (index.html, styles.css, app.js)
 ├── config.py                # Camera, model, threshold, and ROI settings
 ├── setup_model.py           # Downloads the default YOLO weights
 ├── requirements.txt
@@ -18,7 +21,9 @@ smart_elevator/
 │   └── README.md
 └── tests/
     ├── test_roi.py
-    └── test_tracking.py
+    ├── test_tracking.py
+    ├── test_lift_controller.py
+    └── test_web_server.py
 ```
 
 ## Installation
@@ -147,22 +152,54 @@ This line is the Step 2 integration contract. A later controller can consume the
 Run the YOLO-backed five-floor browser simulation:
 
 ```powershell
-python -m smart_elevator.web_server --camera 0 --camera-floor 1
+python -m smart_elevator.web_server --camera 0 --camera-floor 1 --port 8000
 ```
 
-Open <http://127.0.0.1:8000>. The page has three columns:
+Open <http://127.0.0.1:8000>. The page has three panels:
 
-1. the annotated YOLO camera feed and `WAITING_PERSON` state
-2. a five-floor lift shaft showing its current direction and floor
-3. floor request buttons and active requests
+1. **CCTV**: the annotated YOLO feed, `WAITING_PERSON`, track ID, dwell time, and
+   a selector for the floor the camera is mounted on.
+2. **Hoistway cross-section**: every landing has a floor plate, a hall position
+   indicator, UP/DOWN hall lanterns, and UP/DOWN call buttons. The shaft shows the
+   cabin with sliding doors, cable, counterweight, and machine room.
+3. **Car operating panel**: floor/direction display, illuminated cabin buttons,
+   the planned LOOK service order, and an event log.
 
-The camera is associated with `--camera-floor` for display and future
-multi-camera expansion. Selecting a floor request assigns the camera to that
-floor. A request is accepted only while `WAITING_PERSON = TRUE`; otherwise it
-is cancelled immediately and cannot start later when a person appears. If the
-waiting signal disappears while the lift is travelling, the active request is
-also cancelled. The lift moves continuously between floors at 0.5 floors per
-second by default; it does not stop at intermediate floors.
+### LOOK scheduling
+
+`lift_controller.LookController` runs one car with the LOOK algorithm:
+
+- **Hall calls** are UP/DOWN buttons on a landing; **car calls** are cabin buttons.
+- The car keeps its direction while any call lies ahead of it. On the way it
+  stops for car calls and for hall calls going the same way.
+- When nothing is left ahead, it turns around at the last call instead of
+  running to the end of the shaft. A hall call in the opposite direction at that
+  floor is served there.
+- At each stop the doors open (`door_transition_time`), stay open
+  (`door_open_time`), and close before the car moves again. Pressing a call
+  for the current floor reopens the doors.
+- Example: car at floor 1, car call 4, hall UP at 2, hall DOWN at 3 → stops 2, 4, 3.
+
+Speed, door times, and floor count live in `AppConfig`
+(`lift_speed_floors_per_second`, `door_open_time`, `door_transition_time`,
+`num_floors`).
+
+### Camera gating
+
+Only **hall calls on the camera floor** depend on YOLO. Such a call is rejected
+unless `WAITING_PERSON = TRUE`. If the person leaves before the car arrives,
+the call is cancelled. Hall calls on other floors and all car calls are never
+gated.
+
+### HTTP API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/status` | Car position, direction, doors, calls, planned stops, events, camera status |
+| GET | `/video_feed` | Annotated MJPEG stream |
+| POST | `/api/hall/{floor}/{up\|down}` | Landing call |
+| POST | `/api/car/{floor}` | Cabin call |
+| POST | `/api/camera-floor/{floor}` | Move the camera to another floor |
 
 ## Tests
 
@@ -190,7 +227,3 @@ For live testing, use a repeatable scene and verify:
 10. Put one standing person inside and one outside; the result must be `TRUE`.
 
 For reliability before hardware integration, record representative daytime/nighttime clips, tune the threshold and ROI, and measure false positives, false negatives, and FPS on the target computer.
-
-
-
-.\.venv\Scripts\python.exe -m smart_elevator.web_server --camera 0 --camera-floor 1 --port 8000

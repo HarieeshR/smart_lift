@@ -1,4 +1,4 @@
-"""Browser lift simulation backed by the existing YOLO waiting-person detector."""
+"""Browser lift simulation: YOLO waiting-person detection + LOOK scheduling."""
 
 from __future__ import annotations
 
@@ -18,11 +18,13 @@ try:
     from .detector import PersonDetector
     from .roi import ROI
     from .tracking import WaitingPersonAnalyzer
+    from .lift_controller import Direction, LookController
 except ImportError:
     from config import CONFIG, AppConfig, parse_camera_source
     from detector import PersonDetector
     from roi import ROI
     from tracking import WaitingPersonAnalyzer
+    from lift_controller import Direction, LookController
 
 
 ROOT = Path(__file__).resolve().parent
@@ -30,22 +32,22 @@ WEB_DIR = ROOT / "web"
 
 
 class LiftSimulation:
-    """Coordinates camera inference, floor requests, and simulated movement."""
+    """Coordinates camera inference, LOOK scheduling, and simulated movement."""
 
     def __init__(self, app_config: AppConfig, camera_floor: int = 1) -> None:
         self.config = app_config
         self.camera_floor = camera_floor
-        self.current_floor = 1
-        self.lift_position = 1.0
-        self.direction = "IDLE"
-        self.target_floor: int | None = None
-        self.requests: dict[int, float] = {}
+        self.controller = LookController(
+            num_floors=app_config.num_floors,
+            speed=app_config.lift_speed_floors_per_second,
+            door_open_time=app_config.door_open_time,
+            door_transition_time=app_config.door_transition_time,
+        )
         self.last_frame = b""
         self.last_status: dict[str, Any] = {
             "waiting_person": False,
             "person_id": None,
             "dwell_time": 0.0,
-            "event": "Camera starting",
         }
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -55,6 +57,7 @@ class LiftSimulation:
         self._lift_thread = threading.Thread(
             target=self._lift_loop, name="lift-simulation", daemon=True
         )
+        self.controller.log(f"Camera assigned to floor {camera_floor}")
 
     def start(self) -> None:
         self._camera_thread.start()
@@ -74,7 +77,6 @@ class LiftSimulation:
         except (FileNotFoundError, RuntimeError) as error:
             with self._lock:
                 self.last_status["camera_error"] = str(error)
-                self.last_status["event"] = "Camera detector unavailable"
             return
         analyzer = WaitingPersonAnalyzer(
             roi=ROI.from_tuple(self.config.roi),
@@ -105,26 +107,18 @@ class LiftSimulation:
                 ok, encoded = cv2.imencode(".jpg", frame)
                 if ok:
                     with self._lock:
-                        event = self.last_status.get("event", "Monitoring camera")
                         self.last_frame = encoded.tobytes()
                         self.last_status = result.as_dict()
-                        self.last_status["event"] = event
-                        self.last_status.update(
+                        self.last_status["tracks"] = [
                             {
-                                "camera_floor": self.camera_floor,
-                                "tracks": [
-                                    {
-                                        "id": status.track_id,
-                                        "state": status.state.value,
-                                        "dwell_time": round(status.dwell_time, 2),
-                                        "movement": round(status.movement, 1),
-                                        "inside_roi": status.inside_roi,
-                                    }
-                                    for status in statuses
-                                ],
+                                "id": status.track_id,
+                                "state": status.state.value,
+                                "dwell_time": round(status.dwell_time, 2),
+                                "movement": round(status.movement, 1),
+                                "inside_roi": status.inside_roi,
                             }
-                        )
-                    self._start_pending_request()
+                            for status in statuses
+                        ]
         finally:
             camera.release()
 
@@ -166,109 +160,55 @@ class LiftSimulation:
                 now = time.monotonic()
                 elapsed = min(now - previous_time, 0.25)
                 previous_time = now
-                self._advance_lift(elapsed)
+                self._enforce_camera_gating()
+                self.controller.tick(elapsed)
 
-    def _advance_lift(self, elapsed: float) -> None:
-        if self.target_floor is None:
-            self.direction = "IDLE"
+    def _waiting_person(self) -> bool:
+        return bool(self.last_status.get("waiting_person", False))
+
+    def _enforce_camera_gating(self) -> None:
+        """Drop camera-floor hall calls once the waiting person is gone."""
+        if self._waiting_person():
             return
-        if not self.last_status.get("waiting_person", False):
-            self._cancel_request(
-                self.target_floor,
-                "waiting person is no longer detected",
+        for direction in (Direction.UP, Direction.DOWN):
+            self.controller.cancel_hall_call(
+                self.camera_floor, direction, "waiting person left the camera zone"
             )
-            return
 
-        target = float(self.target_floor)
-        distance = target - self.lift_position
-        if abs(distance) <= self.config.lift_speed_floors_per_second * elapsed:
-            self.lift_position = target
-            self.current_floor = self.target_floor
-            self._arrive_at_target()
-            return
-
-        self.direction = "UP" if distance > 0 else "DOWN"
-        self.lift_position += (
-            self.config.lift_speed_floors_per_second
-            * elapsed
-            * (1 if distance > 0 else -1)
-        )
-        self.current_floor = round(self.lift_position)
-
-    def _arrive_at_target(self) -> None:
-        floor = self.current_floor
-        request_time = self.requests.get(floor)
-        if request_time is not None:
-            person_present = (
-                self.last_status.get("waiting_person", False)
-            )
-            if person_present:
-                self.requests.pop(floor, None)
-                self.last_status["event"] = (
-                    f"Floor {floor} request accepted: waiting person confirmed"
+    def request_hall(self, floor: int, direction: str) -> dict[str, Any]:
+        """Register a landing UP/DOWN call; camera-floor calls need a waiting person."""
+        hall_direction = Direction(direction.upper())
+        with self._lock:
+            if floor == self.camera_floor and not self._waiting_person():
+                self.controller.log(
+                    f"Floor {floor} {hall_direction.value} call rejected: "
+                    "no waiting person detected"
                 )
-            else:
-                self._cancel_request(floor, "no waiting person at arrival")
-        remaining = sorted(self.requests)
-        self.target_floor = remaining[0] if remaining else None
-        self.direction = "IDLE" if self.target_floor is None else (
-            "UP" if self.target_floor > self.current_floor else "DOWN"
-        )
-
-    def _start_pending_request(self) -> None:
-        with self._lock:
-            if (
-                not self.last_status.get("waiting_person", False)
-                or self.target_floor is not None
-                or not self.requests
-            ):
-                return
-            self.target_floor = (
-                self.camera_floor
-                if self.camera_floor in self.requests
-                else sorted(self.requests)[0]
-            )
-            self.last_status["event"] = (
-                f"Floor {self.target_floor} request accepted: waiting person detected"
-            )
-
-    def _cancel_request(self, floor: int, reason: str) -> None:
-        self.requests.pop(floor, None)
-        if self.target_floor == floor:
-            self.target_floor = None
-        self.direction = "IDLE"
-        self.last_status["event"] = f"Floor {floor} request cancelled: {reason}"
-
-    def request_floor(self, floor: int) -> dict[str, Any]:
-        if floor < 1 or floor > 5:
-            raise ValueError("Floor must be between 1 and 5")
-        with self._lock:
-            self.camera_floor = floor
-            if not self.last_status.get("waiting_person", False):
-                self._cancel_request(floor, "no waiting person detected")
                 return self.snapshot()
-            self.requests.setdefault(floor, time.time())
-            if self.target_floor is None and self.last_status.get("waiting_person", False):
-                self.target_floor = floor
-                if self.lift_position == floor:
-                    self._arrive_at_target()
-                else:
-                    self.last_status["event"] = (
-                        f"Floor {floor} request accepted: waiting person detected"
-                    )
+            self.controller.add_hall_call(floor, hall_direction)
+            return self.snapshot()
+
+    def request_car(self, floor: int) -> dict[str, Any]:
+        """Register a cabin-panel call; these are never gated by the camera."""
+        with self._lock:
+            self.controller.add_car_call(floor)
+            return self.snapshot()
+
+    def set_camera_floor(self, floor: int) -> dict[str, Any]:
+        if floor < 1 or floor > self.config.num_floors:
+            raise ValueError(f"Floor must be between 1 and {self.config.num_floors}")
+        with self._lock:
+            if floor != self.camera_floor:
+                self.camera_floor = floor
+                self.controller.log(f"Camera assigned to floor {floor}")
             return self.snapshot()
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            return {
-                "current_floor": self.current_floor,
-                "lift_position": round(self.lift_position, 3),
-                "direction": self.direction,
-                "target_floor": self.target_floor,
-                "requests": sorted(self.requests),
-                "camera_floor": self.camera_floor,
-                "camera": self.last_status,
-            }
+            state = self.controller.snapshot()
+            state["camera_floor"] = self.camera_floor
+            state["camera"] = dict(self.last_status)
+            return state
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -289,14 +229,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if self.path.startswith("/api/request/"):
-            try:
-                floor = int(self.path.rsplit("/", 1)[1])
-                self._json(self.simulation.request_floor(floor))
-            except (ValueError, IndexError) as error:
-                self.send_error(HTTPStatus.BAD_REQUEST, str(error))
-        else:
-            self.send_error(HTTPStatus.NOT_FOUND)
+        parts = self.path.strip("/").split("/")
+        try:
+            if parts[:2] == ["api", "hall"] and len(parts) == 4:
+                self._json(self.simulation.request_hall(int(parts[2]), parts[3]))
+            elif parts[:2] == ["api", "car"] and len(parts) == 3:
+                self._json(self.simulation.request_car(int(parts[2])))
+            elif parts[:2] == ["api", "camera-floor"] and len(parts) == 3:
+                self._json(self.simulation.set_camera_floor(int(parts[2])))
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND)
+        except ValueError as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
 
     def _file(self, name: str, content_type: str) -> None:
         data = (WEB_DIR / name).read_bytes()
@@ -333,8 +277,8 @@ class Handler(BaseHTTPRequestHandler):
 def run_server(
     config: AppConfig = CONFIG, port: int = 8000, camera_floor: int = 1
 ) -> None:
-    if camera_floor < 1 or camera_floor > 5:
-        raise ValueError("camera_floor must be between 1 and 5")
+    if camera_floor < 1 or camera_floor > config.num_floors:
+        raise ValueError(f"camera_floor must be between 1 and {config.num_floors}")
     simulation = LiftSimulation(config, camera_floor=camera_floor)
     Handler.simulation = simulation
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
