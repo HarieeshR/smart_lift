@@ -7,6 +7,7 @@ import json
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -270,6 +271,21 @@ def ensure_certificate() -> tuple[Path, Path]:
     return cert, key
 
 
+class LiftHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
+        # Browsers drop the connection until the self-signed cert is accepted, and
+        # http:// requests hit the TLS port; log those as one line, not a traceback.
+        error = sys.exc_info()[1]
+        if isinstance(error, (ssl.SSLError, ConnectionError)):
+            reason = getattr(error, "reason", None) or type(error).__name__
+            hint = " (use https://)" if reason == "HTTP_REQUEST" else ""
+            print(f"  TLS/connection from {client_address[0]} dropped: {reason}{hint}", flush=True)
+            return
+        super().handle_error(request, client_address)
+
+
 def run_server(
     config: AppConfig = CONFIG,
     port: int = 8000,
@@ -282,8 +298,7 @@ def run_server(
         kind = "browser" if source == "browser" else ("local" if source.isdigit() else "url")
         simulation.enable_camera(floor, kind, source)
     Handler.simulation = simulation
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
+    server = LiftHTTPServer((host, port), Handler)
     scheme = "http"
     if use_https:
         cert, key = ensure_certificate()
