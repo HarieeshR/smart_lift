@@ -193,6 +193,8 @@ def run(app_config: AppConfig = CONFIG) -> None:
     )
     analyzer = build_analyzer(app_config)
     camera = cv2.VideoCapture(parse_camera_source(app_config.camera_source))
+    # Uncompressed YUYV is limited to ~10 FPS at 720p over USB; MJPG gives 30.
+    camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, app_config.image_width)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, app_config.image_height)
 

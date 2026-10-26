@@ -10,6 +10,7 @@ except ImportError:  # Supports running main.py directly from this directory.
 
 
 PERSON_CLASS_ID = 0
+TRACKER_CONFIG = Path(__file__).resolve().parent / "trackers" / "bytetrack.yaml"
 
 
 class PersonDetector:
@@ -62,7 +63,7 @@ class PersonDetector:
             imgsz=self.inference_image_size,
             device=self.device,
             persist=True,
-            tracker="bytetrack.yaml",
+            tracker=str(TRACKER_CONFIG),
             verbose=False,
         )
         return self._detections_from_results(results)

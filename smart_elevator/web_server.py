@@ -217,7 +217,8 @@ class Handler(BaseHTTPRequestHandler):
             camera = self.simulation.cameras.get(floor)
             if camera is None:
                 return
-            frame = camera.jpeg()
+            # Send each frame as soon as it is encoded instead of polling.
+            frame = camera.wait_jpeg(last)
             if frame and frame is not last:
                 last = frame
                 try:
@@ -225,7 +226,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
                     return
-            time.sleep(0.05)
 
 
 def lan_addresses() -> list[str]:

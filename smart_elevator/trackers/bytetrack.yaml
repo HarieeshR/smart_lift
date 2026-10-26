@@ -1,0 +1,11 @@
+# ByteTrack settings for the smart elevator (Ultralytics defaults, except track_buffer).
+# track_buffer counts frames. The pipeline used to run at 10 FPS, where the default
+# of 30 frames kept a lost person's ID for 3 s. At 30 FPS, 90 frames keeps those
+# same 3 s, so IDs survive occlusions exactly as long as before.
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 90
+match_thresh: 0.8
+fuse_score: True

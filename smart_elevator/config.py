@@ -28,7 +28,8 @@ class AppConfig:
     motion_window: float = 1.0
     # Seconds with nobody in a floor's waiting zone before its camera call is cancelled.
     person_lost_timeout: float = 2.0
-    camera_max_fps: float = 10.0
+    # Webcams deliver 30 FPS (MJPG); the GPU runs YOLO at well over 100 FPS.
+    camera_max_fps: float = 30.0
     lift_update_interval: float = 0.05
     lift_speed_floors_per_second: float = 0.5
     num_floors: int = 5

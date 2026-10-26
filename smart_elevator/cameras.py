@@ -96,6 +96,8 @@ class CaptureSource(FrameSource):
         capture = cv2.VideoCapture(parse_camera_source(self.source))
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if isinstance(parse_camera_source(self.source), int):
+            # Uncompressed YUYV is limited to ~10 FPS at 720p over USB; MJPG gives 30.
+            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         if capture.isOpened():
@@ -176,6 +178,7 @@ class FloorCamera:
         )
         self._detector_factory = detector_factory
         self._lock = threading.Lock()
+        self._jpeg_ready = threading.Condition(self._lock)
         self._stop = threading.Event()
         self.last_jpeg = b""
         self.result: dict[str, Any] = {
@@ -237,6 +240,12 @@ class FloorCamera:
         with self._lock:
             return self.last_jpeg
 
+    def wait_jpeg(self, previous: bytes, timeout: float = 1.0) -> bytes:
+        """Block until a frame newer than ``previous`` is encoded (or timeout)."""
+        with self._jpeg_ready:
+            self._jpeg_ready.wait_for(lambda: self.last_jpeg is not previous, timeout)
+            return self.last_jpeg
+
     # --------------------------------------------------------------- worker
     def _run(self) -> None:
         try:
@@ -252,6 +261,7 @@ class FloorCamera:
             frame = self.source.read(timeout=0.5)
             if frame is None:
                 continue
+            frame_started = time.perf_counter()
             height, width = frame.shape[:2]
             if (width, height) != frame_size:
                 frame_size = (width, height)
@@ -281,6 +291,7 @@ class FloorCamera:
             with self._lock:
                 if ok:
                     self.last_jpeg = encoded.tobytes()
+                    self._jpeg_ready.notify_all()
                 self.result = {
                     **result.as_dict(),
                     "dwell_time": round(result.dwell_time, 2),
@@ -297,7 +308,8 @@ class FloorCamera:
                 }
                 if result.people_in_zone:
                     self.last_present = time.monotonic()
-            spare = min_interval - (time.perf_counter() - now)
+            # Pace from frame arrival so processing time counts toward the interval.
+            spare = min_interval - (time.perf_counter() - frame_started)
             if spare > 0:
                 self._stop.wait(spare)
 

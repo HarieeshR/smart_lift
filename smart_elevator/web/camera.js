@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const TARGET_FPS = 8;
+const TARGET_FPS = 20;
 const MAX_WIDTH = 960;
 
 const canvas = document.createElement('canvas');
