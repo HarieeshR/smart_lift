@@ -1,0 +1,11 @@
+ACCURACY = {'model': 'yolo11n.pt',
+ 'dataset': 'coco128.yaml',
+ 'image_size': 640,
+ 'evaluated_class': 'person',
+ 'precision': 0.7774,
+ 'recall': 0.7165,
+ 'f1': 0.7457,
+ 'map50': 0.7876,
+ 'map50_95': 0.5377,
+ 'inference_ms_per_image': 2.26,
+ 'measured_at': '2026-10-27T07:31:01'}
