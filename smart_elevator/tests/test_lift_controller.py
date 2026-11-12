@@ -33,7 +33,7 @@ def test_look_serves_calls_in_travel_direction_before_reversing():
 
 
 def test_opposite_hall_call_is_passed_then_served_on_the_way_down():
-    lift = controller()
+    lift=controller()
     lift.add_car_call(5)
     lift.add_hall_call(3, DOWN)
 
